@@ -43,9 +43,19 @@ mod row;
 
 pub mod audit;
 
-pub use eff::{perform, pure, Answer, AnyOp, Bind, Eff, Never, Node, Pass, Program, Reply};
+pub use eff::{defer, perform, pure, tail_rec, Loop, Answer, AnyOp, Bind, Eff, Never, Node, Pass, Program, Reply};
 pub use handler::{Handler, Interceptor, Observer, K};
 pub use row::{AuditAll, Audited, Cons, Effect, Here, Kind, Mark, MarkKind, Member, Nil, Plain, PlainKind, Sensitive, There};
+
+/// A TAIL CALL: `call!(f(a, b))` — `f(a, b)` made when the machine gets to it, not now; so functions calling each
+/// other in tail position (`is_even` → `is_odd` → …) run in constant stack, however deep. The arguments are evaluated
+/// when the call is made, and cloned: a rest resumed twice calls again
+#[macro_export]
+macro_rules! call {
+    ($($f:ident)::+ ( $($arg:expr),* $(,)? )) => {
+        $crate::defer(move || $($f)::+($(($arg).clone()),*))
+    };
+}
 
 /// A FOR OVER PROGRAMS: `x <- p;` binds `p`'s value, `_ <- p;` or `p;` drops it, `let x = v;` names a value, the last
 /// line a program or `yield v`. The rests are closures called as many times as a handler resumes them: each takes

@@ -27,12 +27,13 @@ The specification is okay-core's kernel and its suites: each test here is one of
 1. [Rows](#rows)
 2. [Effects and operations](#effects-and-operations)
 3. [Programs and `eff!`](#programs-and-eff)
-4. [Handlers](#handlers)
-5. [The machine](#the-machine)
-6. [Control and audit: interceptors](#control-and-audit-interceptors)
-7. [What the types refuse](#what-the-types-refuse)
-8. [What Rust costs, against Scala](#what-rust-costs-against-scala)
-9. [Next](#next)
+4. [Recursion in constant stack](#recursion-in-constant-stack)
+5. [Handlers](#handlers)
+6. [The machine](#the-machine)
+7. [Control and audit: interceptors](#control-and-audit-interceptors)
+8. [What the types refuse](#what-the-types-refuse)
+9. [What Rust costs, against Scala](#what-rust-costs-against-scala)
+10. [Next](#next)
 
 ## Rows
 
@@ -78,6 +79,40 @@ The standard effects (`okay::effects`): `Reader<V>` (`ask`, `reader`), `State<S>
 or `yield v`. The rests are `Fn` closures — a handler may resume them many times — so each takes copies (`clone`) of
 the names bound before it: a name bound is `Clone`. `flat_map` is typed by a trait, `Bind<N>`: the answer met chosen
 by the kind of the rest, so that answer-type modification (`Cont`, stage 2) binds with no specialization.
+
+## Recursion in constant stack
+
+Rust has no guaranteed tail calls: functions calling each other a million times overflow the thread's stack. A
+program's recursion runs on the machine's own stack, on the heap, instead — two ways to write it:
+
+- `call!(f(args))` — a TAIL CALL: `f(args)` made when the machine gets to it (`defer`), so `is_even` → `is_odd` → …
+  is a loop of the machine, however deep. The arguments are evaluated at the call and cloned (a rest resumed twice
+  calls again).
+- `tail_rec(s0, step)` — a LOOP (cats' `tailRecM`): `step` from a state to a program of `Loop::Next(s)` or
+  `Loop::Done(a)`. Mutual recursion is a loop whose state names the function and its arguments.
+
+```rust
+fn is_even(i: i64) -> Eff<Nil, bool> { if i == 0 { pure(true) } else { call!(is_odd(i - 1)) } }
+fn is_odd(i: i64) -> Eff<Nil, bool> { if i == 0 { pure(false) } else { call!(is_even(i - 1)) } }
+assert!(is_even(1_000_000).run());
+
+// an effect at each step: a million operations of a state
+fn even_counted(i: i64) -> Eff<row![State<i64>], bool> {
+    if i == 0 { pure(true) } else { eff! { modify::<i64, _, _>(|s| s + 1); call!(odd_counted(i - 1)) } }
+}
+
+enum Call { Even(i64), Odd(i64) }
+let p = tail_rec(Call::Even(1_000_000), |c| ask::<i64, R, _>().map(move |d| match c {
+    Call::Even(0) => Loop::Done(true),
+    Call::Odd(0) => Loop::Done(false),
+    Call::Even(i) => Loop::Next(Call::Odd(i - d)),
+    Call::Odd(i) => Loop::Next(Call::Even(i - d)),
+}));
+```
+
+The one rule: the recursive call inside a closure — `call!`, `defer`, a rest of `flat_map` or `eff!` — never before
+it (`is_odd(i - 1).flat_map(…)` builds the whole tree first, by Rust's own recursion). Checked on a million steps,
+with and without an effect at each, and a loop under a choice, each path its own (`tests/recursion.rs`).
 
 ## Handlers
 

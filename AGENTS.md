@@ -27,6 +27,11 @@
     description), passes it on (`proceed`, `proceed_then` telling its answer each time the rest gets it) or refuses
     it. So an operation's value is `Clone + Debug`, and an effect's enum too.
   - the trail is an effect, `audit::Audit` (`record`, handled by `trail()`), outside the interceptors.
+- Recursion: `call!(f(args))` (a tail call, `defer` underneath) and `tail_rec(s0, step)` (`Loop::Next`/`Done`) run
+  any depth on the machine's heap stack (`tests/recursion.rs`, a million steps). A recursive call before its
+  `flat_map` is Rust's own recursion: keep it inside a closure.
+- Benchmarks: `benches/kernel.rs`, okay-core's KernelBenchmark lanes, the same programs and n; run it under JMH's
+  lock (`/tmp/okz/tools/withlock.py`) — other sessions measure on this machine — and compile under it too.
 - Stage 2 (not yet): `Cont<R, I, O, A>` for answer-type modification — `$`/`reset`, `shift0`, `PState` — with
   `Bind` impls for the four pairs of `Eff`/`Cont` (no overlap, so no specialization); `on_unimplemented` messages.
 - No casts outside `take`/`take_op`/`state` (the erased machine's three); no panics but theirs and the machine's

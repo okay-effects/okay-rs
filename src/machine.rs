@@ -124,6 +124,7 @@ pub(crate) fn run(node: Node) -> Val {
                     Level::Top => panic!("okay: the top handles no effect"),
                 }
             }
+            Kind::Defer(p) => p().0,
             Kind::Resume(k, v) => {
                 stack.extend(k.0.iter().cloned());
                 Kind::Return(v)

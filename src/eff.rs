@@ -31,6 +31,8 @@ pub(crate) enum Kind {
     Handle(Box<Node>, crate::machine::Level),
     /// a `k` resumed: its levels put back, the value to its frames
     Resume(crate::machine::K0, Val),
+    /// a program made when the run gets to it
+    Defer(Rc<dyn Fn() -> Node>),
 }
 
 /// AN OPERATION ERASED, with what an observer needs of it: its effect, a description, a copy — and of its answer the
@@ -131,6 +133,37 @@ impl<R, A, B> Bind<Eff<R, B>> for Eff<R, A> {
 /// `a`, over any row
 pub fn pure<R, A: 'static>(a: A) -> Eff<R, A> {
     Eff::of(Kind::Return(Box::new(a)))
+}
+
+/// `p`, made when the run gets to it: a recursion built lazily
+pub fn defer<R: 'static, A: 'static>(p: impl Fn() -> Eff<R, A> + 'static) -> Eff<R, A> {
+    Eff::of(Kind::Defer(Rc::new(move || p().node)))
+}
+
+/// A STEP OF A LOOP: on, with the next state, or done, with the value
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Loop<S, A> {
+    Next(S),
+    Done(A),
+}
+
+/// A LOOP IN CONSTANT STACK (cats' `tailRecM`): `step` from a state to a program of the next step — `Next(s)` on,
+/// `Done(a)` its value. Mutual recursion is a loop whose state names the function and its arguments
+/// (`enum Call { Even(i64), Odd(i64) }`); the step's program may perform any effect of its row
+pub fn tail_rec<R: 'static, S: 'static, A: 'static>(
+    s0: S,
+    step: impl Fn(S) -> Eff<R, Loop<S, A>> + 'static,
+) -> Eff<R, A> {
+    looping(s0, Rc::new(step))
+}
+
+#[allow(clippy::type_complexity)]
+fn looping<R: 'static, S: 'static, A: 'static>(s: S, step: Rc<dyn Fn(S) -> Eff<R, Loop<S, A>>>) -> Eff<R, A> {
+    let on = step.clone();
+    step(s).flat_map(move |l| match l {
+        Loop::Next(s) => looping(s, on.clone()),
+        Loop::Done(a) => pure(a),
+    })
 }
 
 /// AN OPERATION of `E`, in the row `R`: `make` its variant given its reply — `perform(Reader::Ask)`, `perform(|r|
