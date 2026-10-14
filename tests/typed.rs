@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use okay::eff;
 use okay::effects::{Reader, State, Throws, Writer};
 use okay::typed::*;
-use okay::{Effect, Reply, Sensitive};
 
 async fn counted<C, I1, I2, I3>(cx: &C, n: i64) -> i64
 where
@@ -95,17 +94,11 @@ fn a_generator_each_value_as_it_comes_the_body_resumed_once() {
 
 // A SENSITIVE EFFECT: payments, under their audit only
 
-#[derive(Clone, Debug)]
-enum Pay {
-    Transfer(String, i64, Reply<Result<String, String>>),
-}
-impl Effect for Pay {
-    type Kind = Sensitive;
-}
-
-fn transfer<'c, C: Has<Pay, I>, I>(cx: &'c C, to: &str, amount: i64) -> Perform<'c, C, Pay, I, Result<String, String>> {
-    let to = to.to_string();
-    perform(cx, |r| Pay::Transfer(to, amount, r))
+okay::effect! {
+    enum Pay: Sensitive {
+        /// money sent to an account: a receipt, or why not
+        Transfer(to: String, amount: i64) -> Result<String, String> = transfer;
+    }
 }
 
 struct Bank(RefCell<i64>);
@@ -144,8 +137,8 @@ fn a_sensitive_effect_under_its_audit() {
     );
     let c = &cx; // `eff! { … }` moves what it uses: a reference to the context
     let r: Result<Result<String, String>, Stuck> = run(eff! {
-        a <- transfer(c, " acct-1 ", 100);
-        b <- transfer(c, "acct-2", 5000);
+        a <- transfer(c, " acct-1 ".into(), 100);
+        b <- transfer(c, "acct-2".into(), 5000);
         yield a.and(b)
     });
     assert_eq!(r, Ok(Err("refused: 5000 over the limit 1000".to_string())));

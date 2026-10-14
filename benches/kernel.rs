@@ -444,6 +444,12 @@ mod typed {
         }));
         sum.into_inner()
     }
+
+    /// every value of a choice among n: n paths, each the body run again, its choice told it
+    pub fn choose() -> usize {
+        let xs: Vec<i64> = (0..N).collect();
+        run(all(&End, async |cx| among(cx, &xs).await + 1)).map(|v| v.len()).unwrap_or(0)
+    }
 }
 
 // THE HARNESS: JMH's AverageTime — warm-up, then rounds of a second, µs a run
@@ -507,6 +513,7 @@ fn main() {
         ("T:readsOpaque", Box::new(|| typed::reads_opaque() as u64)),
         ("T:throwing", Box::new(|| typed::throwing() as u64)),
         ("T:generate", Box::new(|| typed::generate_() as u64)),
+        ("T:choose", Box::new(|| typed::choose() as u64)),
     ];
     // each lane's answer, the Scala lanes' own
     assert!(answered() && general() && forwarded() && forwarded16() && forwarded_k() && forwarded_k16());
@@ -516,7 +523,7 @@ fn main() {
     assert!(typed::answered());
     assert_eq!((typed::reads(), typed::writer(), typed::state(), typed::state_deep(), typed::throwing(), typed::generate_()),
         (N, N as usize, N, N, 2 * N, N * (N - 1) / 2));
-    assert_eq!((typed::state_opaque(), typed::reads_opaque()), (N, N));
+    assert_eq!((typed::state_opaque(), typed::reads_opaque(), typed::choose()), (N, N, N as usize));
     assert_eq!((direct::reads(), direct::writer(), direct::state(), direct::state_deep(), direct::state_dyn(), direct::reads_dyn()), (N, N as usize, N, N, N, N));
     for (name, f) in &lanes {
         if only.is_empty() || only.iter().any(|o| o == name) {

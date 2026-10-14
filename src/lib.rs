@@ -108,3 +108,85 @@ macro_rules! eff {
     (@async $e:expr) => { ($e).await };
     ($($t:tt)+) => { async move { $crate::eff!(@async $($t)+) } };
 }
+
+/// AN EFFECT DECLARED: its enum (`Clone`, `Debug`, each operation's `Reply` last), its kind, and each operation twice —
+/// for a program as data (`Pay::transfer(…)`, an `Eff`) and for one compiled by its handlers' types (`transfer(cx, …)`,
+/// `okay::typed`)
+///
+/// ```
+/// use okay::*;
+/// use okay::typed::{run, Cx, End, Handles, Step};
+///
+/// effect! {
+///     /// a counter
+///     pub enum Count: Plain {
+///         /// one more: the count now
+///         Add(n: i64) -> i64 = add;
+///         /// the count
+///         Now() -> i64 = now;
+///     }
+/// }
+///
+/// struct Counter(std::cell::Cell<i64>);
+/// impl Handles<Count> for Counter {
+///     fn handle(&self, op: Count) -> Step {
+///         match op {
+///             Count::Add(n, r) => { self.0.set(self.0.get() + n); Step::Now(r.give(self.0.get())) }
+///             Count::Now(r) => Step::Now(r.give(self.0.get())),
+///         }
+///     }
+/// }
+///
+/// let cx = Cx(Counter(std::cell::Cell::new(0)), End);
+/// assert_eq!(run(eff! { add(&cx, 2); add(&cx, 3); now(&cx) }), Ok(5));
+///
+/// let p: Eff<row![Count], i64> = eff! { data; Count::add(2); Count::now() };
+/// let counted = p.handle(Handler::stateful(0i64, |c: &mut i64, op| match op {
+///     Count::Add(n, r) => { *c += n; r.give(*c) }
+///     Count::Now(r) => r.give(*c),
+/// }, |_, a| a));
+/// assert_eq!(counted.run(), 2);
+/// ```
+#[macro_export]
+macro_rules! effect {
+    (
+        $(#[$m:meta])*
+        $vis:vis enum $name:ident : $kind:ident {
+            $(
+                $(#[$om:meta])*
+                $op:ident ( $($arg:ident : $ty:ty),* $(,)? ) -> $out:ty = $f:ident ;
+            )*
+        }
+    ) => {
+        $(#[$m])*
+        #[derive(Clone, Debug)]
+        $vis enum $name {
+            $( $(#[$om])* $op($($ty,)* $crate::Reply<$out>), )*
+        }
+
+        impl $crate::Effect for $name {
+            type Kind = $crate::$kind;
+        }
+
+        impl $name {
+            $(
+                $(#[$om])*
+                #[allow(clippy::too_many_arguments)]
+                $vis fn $f<OkayRow: $crate::Member<$name, OkayIx>, OkayIx>($($arg: $ty),*) -> $crate::Eff<OkayRow, $out> {
+                    $crate::perform(move |r| $name::$op($($arg,)* r))
+                }
+            )*
+        }
+
+        $(
+            $(#[$om])*
+            #[inline(always)]
+            #[allow(clippy::too_many_arguments)]
+            $vis fn $f<'c, OkayCx: $crate::typed::Has<$name, OkayIx>, OkayIx>(
+                cx: &'c OkayCx $(, $arg: $ty)*
+            ) -> $crate::typed::Perform<'c, OkayCx, $name, OkayIx, $out> {
+                $crate::typed::perform(cx, move |r| $name::$op($($arg,)* r))
+            }
+        )*
+    };
+}

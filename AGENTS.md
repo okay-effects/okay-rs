@@ -30,6 +30,12 @@
 - Recursion: `call!(f(args))` (a tail call, `defer` underneath) and `tail_rec(s0, step)` (`Loop::Next`/`Done`) run
   any depth on the machine's heap stack (`tests/recursion.rs`, a million steps). A recursive call before its
   `flat_map` is Rust's own recursion: keep it inside a closure.
+- `okay::typed` — ONE API compiled by the handlers' types: `eff! { … }` is an `async` block over a context `cx`
+  (`Cx(h, rest)`, `Has<E, Ix>`), a program as data the machine's `eff! { data; … }`. An operation goes through each
+  layer of the context (`Has::perform`/`resume`, typed by its value): `Paths` (`all`/`first`) logs the answers from
+  further out and replays them (many-shot `k` by replay — the body an `AsyncFn` deciding by its effects only),
+  `Observed` (`observe`) shows each to a `Watch`. `tail_rec` for recursion in constant stack. `effect!` declares an
+  effect and its operations for both forms. `tests/replay.rs` checks the replay against the machine's values.
 - Benchmarks: `benches/kernel.rs`, okay-core's KernelBenchmark lanes, the same programs and n; run it under JMH's
   lock (`/tmp/okz/tools/withlock.py`) — other sessions measure on this machine — and compile under it too.
 - Stage 2 (not yet): `Cont<R, I, O, A>` for answer-type modification — `$`/`reset`, `shift0`, `PState` — with

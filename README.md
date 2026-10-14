@@ -198,8 +198,7 @@ in a row). Monomorphized for the handlers it runs under, an operation is compile
 - dropping the rest (`either`): the body's future dropped where it raised;
 - taking the rest once (`generate`): the block suspended, resumed once — the state machine itself the `k`, nothing on
   the heap;
-- taking it many times (`choose`): not yet — the machine (`eff! { data; … }`, a program as data), or a replay of
-  the program, next.
+- taking it many times (`choose`): by replay — the body run again for each path, its past told it again (below).
 
 No turbofish: an operation's type is inferred from the context's bounds (`Has<Reader<i64>, _>`) or its argument.
 
@@ -235,8 +234,56 @@ audit.
 | `throwing` — each raise under its own either | 20.23 | 94.7 | **7.66** |
 | a generator, 1000 values, the body suspended and resumed at each | 22.6 (okay-one's `generate`) | — | **2.14** |
 
-With the context visible, LLVM folds the loops of `reads` and `state` altogether (0.017). Open: many-shot `k` (replay,
-or the machine) — then the machine is only what replay cannot do.
+| `choose` — every value of a choice among 1000 | 13.24 | 107.9 | **6.1** (replay) |
+
+With the context visible, LLVM folds the loops of `reads` and `state` altogether (0.017).
+
+### The rest taken many times: replay
+
+`all(cx, body)` runs the body again for each path, and tells it its past again (Koppel, Scherer, Siek, "Capturing the
+future by replaying the past", ICFP 2018): the choices made so far, and every answer a handler further out gave before
+the last of them — told again, not asked again. So a state further out is threaded through the paths in order,
+exactly as the machine's `all` under it; a state inside the body is each path's own; a writer further out hears what
+was told before a choice once. `first(cx, body)` stops at the first path not failing. `flip`, `among`, `fail`.
+
+```rust
+let cx = Cx(StateCell::new(0i64), End);
+let r = run(all(&cx, async |cx| eff! {
+    s <- get(cx);              // read once: each path resumed with it, as the machine's k holds it
+    b <- flip(cx);
+    _ <- put(cx, s + 1);
+    yield (b, s)
+}.await));
+assert_eq!(r, Ok(vec![(true, 0), (false, 0)]));
+```
+
+The cost: a path's prefix run again — the operations before its last choice answered from the log, not by their
+handlers; n paths of depth d, n × d steps. The rule: the body decides by its effects only (an `AsyncFn`; a cell or the
+clock read outside an effect breaks the replay, and it panics saying so). `tests/replay.rs`: the machine's suite's
+choose programs, a read before the choice, a state in each path, the triples, eight queens (92), `all` inside `all`.
+
+### Recursion, every effect seen, an effect declared
+
+- **`tail_rec(s0, async |s| … Loop::Next(s2) / Loop::Done(a))`**: a loop in constant stack — a recursion, a mutual
+  one (its calls the states: `Call::Even(n)`, `Call::Odd(n)`), at any depth: a million calls, each a state's
+  operation. An async recursion is Rust's own: each call a future boxed in its caller's, polled through them all.
+- **`observe(cx, watch, body)`**: every operation of every effect on its way out seen by a `Watch` — its effect
+  (`State<i64>`), the operation as written (`Put(6, _)`), its answer — let through or refused (the body dropped
+  there: `Err(why)`); a layer with no handler of its own, each effect at the index it has further out. Outside `all`
+  it sees an operation further out once; inside, each time the path runs.
+- **`effect!`**: the enum, its kind, each operation for both forms — `Pay::transfer(…)` an `Eff`, `transfer(cx, …)`
+  a `Perform`:
+
+```rust
+okay::effect! {
+    /// payments
+    pub enum Pay: Sensitive {
+        /// money sent to an account: a receipt, or why not
+        Transfer(to: String, amount: i64) -> Result<String, String> = transfer;
+        Balance() -> i64 = balance;
+    }
+}
+```
 
 ## Level 1: effects passed down, direct style
 

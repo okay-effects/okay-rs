@@ -358,7 +358,7 @@ impl AnyOp {
 }
 
 /// a type's name, its paths dropped: `okay::effects::Reader<i64>` to `Reader<i64>`
-fn short(name: &str) -> String {
+pub(crate) fn short(name: &str) -> String {
     let mut out = String::new();
     let mut word = String::new();
     let mut chars = name.chars().peekable();
