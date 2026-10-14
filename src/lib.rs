@@ -37,6 +37,7 @@
 
 pub mod effects;
 mod eff;
+mod frame;
 mod handler;
 mod machine;
 mod row;

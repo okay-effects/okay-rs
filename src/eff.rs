@@ -13,7 +13,7 @@ use crate::row::{AuditAll, Audited, Effect, Mark, Member, Nil, PlainKind, Sensit
 pub(crate) use crate::val::Val;
 /// a frame: the rest of a bind, given the value — `Fn`, not `FnOnce`: a `k` is resumed as many times as its handler
 /// wants
-pub(crate) type Frame = Rc<dyn Fn(Val) -> Node>;
+pub(crate) use crate::frame::Frame;
 
 /// a program erased: the machine's
 #[doc(hidden)]
@@ -200,13 +200,13 @@ impl<R, A: 'static> Eff<R, A> {
         F: Fn(A) -> N + 'static,
         Self: Bind<N>,
     {
-        let frame: Frame = Rc::new(move |v: Val| f(v.take::<A>()).into_node());
+        let frame = Frame::new(move |v: Val| f(v.take::<A>()).into_node());
         <Self as Bind<N>>::Out::from_node(Node(bound(self.node.0, frame)))
     }
 
     /// `f` of the value
     pub fn map<B: 'static>(self, f: impl Fn(A) -> B + 'static) -> Eff<R, B> {
-        let frame: Frame = Rc::new(move |v: Val| Node(Kind::Return(Val::new(f(v.take::<A>())))));
+        let frame = Frame::new(move |v: Val| Node(Kind::Return(Val::new(f(v.take::<A>())))));
         Eff::of(bound(self.node.0, frame))
     }
 
@@ -324,7 +324,7 @@ impl AnyOp {
     /// passed on, to the handler further out: its answer to the rest `k`
     pub fn proceed<T, B>(self, k: &crate::handler::K<T, B>) -> Eff<T, B> {
         let k0 = k.k.clone();
-        let frame: Frame = Rc::new(move |v: Val| Node(Kind::Resume(k0.clone(), v)));
+        let frame = Frame::new(move |v: Val| Node(Kind::Resume(k0.clone(), v)));
         Eff::of(Kind::Inject(self.0, frame))
     }
 
@@ -338,10 +338,12 @@ impl AnyOp {
         let k0 = k.k.clone();
         let describe = self.0.info.describe_answer;
         let copy = self.0.info.copy_answer;
-        let frame: Frame = Rc::new(move |v: Val| {
-            let told = after(describe(&v)).node;
+        let after = Rc::new(after);
+        let frame = Frame::new(move |v: Val| {
+            let told = (*after)(describe(&v)).node;
             let k0 = k0.clone();
-            let back: Frame = Rc::new(move |_| Node(Kind::Resume(k0.clone(), copy(&v))));
+            let v = Rc::new(v);
+            let back = Frame::new(move |_| Node(Kind::Resume(k0.clone(), copy(&v))));
             Node(bound(told.0, back))
         });
         Eff::of(Kind::Inject(self.0, frame))

@@ -55,15 +55,34 @@ impl Level {
 }
 
 /// a level and the frames waiting inside it, innermost last
-#[derive(Clone)]
 pub(crate) struct Segment {
     level: Level,
     frames: Vec<Frame>,
 }
 
-/// a rest taken: the levels from a handler's up, outermost first — shared, resumed by copies
+/// a rest taken: the levels from a handler's up, outermost first, their frames shared — resumed by copies of
+/// their `Rc`s
 #[derive(Clone)]
 pub(crate) struct K0(Rc<Vec<Segment>>);
+
+impl K0 {
+    /// the levels from `i` up taken off `stack`: their frames made shared where they are, once
+    fn take(stack: &mut Vec<Segment>, i: usize) -> K0 {
+        let mut taken = stack.split_off(i);
+        for s in taken.iter_mut() {
+            s.frames.iter_mut().for_each(Frame::make_shared);
+        }
+        K0(Rc::new(taken))
+    }
+
+    /// the levels put back on `stack`, copies: each frame's `Rc`, each state as it was
+    fn put(&self, stack: &mut Vec<Segment>) {
+        stack.extend(self.0.iter().map(|t| Segment {
+            level: t.level.clone(),
+            frames: t.frames.iter().map(Frame::copy_shared).collect(),
+        }));
+    }
+}
 
 /// a program of no effect run to its value
 pub(crate) fn run(node: Node) -> Val {
@@ -76,7 +95,7 @@ pub(crate) fn run(node: Node) -> Val {
             Kind::Return(v) => {
                 let Some(top) = stack.last_mut() else { return v };
                 match top.frames.pop() {
-                    Some(f) => f(v).0,
+                    Some(f) => f.call(v).0,
                     // a level's frames all done: the level left, the value through its `ret`
                     None => match stack.pop().map(|s| s.level) {
                         None | Some(Level::Top) => return v,
@@ -93,18 +112,18 @@ pub(crate) fn run(node: Node) -> Val {
                 }
                 m.0
             }
-            Kind::Then(v, f) => f(v).0,
+            Kind::Then(v, f) => f.call(v).0,
             Kind::Inject(op, f) => {
                 let Some(i) = stack.iter().rposition(|s| s.level.catches(op.effect)) else {
                     panic!("okay: an operation with no handler — a row not checked")
                 };
                 match &mut stack[i].level {
                     // answered in place: the value straight into the rest, no frame pushed
-                    Level::Answering(_, rt) => f((rt.value)(op.value)).0,
+                    Level::Answering(_, rt) => f.call((rt.value)(op.value)).0,
                     Level::Stateful(_, rt, s) => {
                         let (s2, v) = (rt.step)(std::mem::replace(s, hole.clone()), op.value);
                         *s = s2;
-                        f(v).0
+                        f.call(v).0
                     }
                     // the rest taken: its frame first on the top, into `k`
                     _ => {
@@ -134,13 +153,13 @@ pub(crate) fn run(node: Node) -> Val {
                     }
                     Level::Deep(_, rt) => {
                         let rt = rt.clone();
-                        let k = K0(Rc::new(stack.split_off(i)));
+                        let k = K0::take(&mut stack, i);
                         (rt.apply)(op.value, k).0
                     }
                     // an observer: the rest taken as a handler's, its clause run outside it with the whole operation
                     Level::Observe(rt) => {
                         let rt = rt.clone();
-                        let k = K0(Rc::new(stack.split_off(i)));
+                        let k = K0::take(&mut stack, i);
                         (rt.apply)(op, k).0
                     }
                     Level::Top => panic!("okay: the top handles no effect"),
@@ -148,7 +167,7 @@ pub(crate) fn run(node: Node) -> Val {
             }
             Kind::Defer(p) => p().0,
             Kind::Resume(k, v) => {
-                stack.extend(k.0.iter().cloned());
+                k.put(&mut stack);
                 Kind::Return(v)
             }
         }
