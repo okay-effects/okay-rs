@@ -190,32 +190,44 @@ Checked by `compile_fail` doc tests (`src/lib.rs`, `src/audit.rs`), each failing
 ## Speed
 
 okay-core's kernel lanes (`KernelBenchmark`), the same programs and n, ported to `benches/kernel.rs`; one machine (an
-Apple Mac), two interleaved rounds, JMH's AverageTime for Scala, the same warm-up and rounds for Rust
-(`cargo bench --bench kernel`, run under JMH's lock). µs per run:
+Apple Mac), JMH's AverageTime for Scala, the same warm-up and rounds for Rust (`cargo bench --bench kernel`, run under
+JMH's lock). µs per run of the program:
 
-| lane | Scala (okay-core, JVM 26) | Rust (okay-rs) | Rust / Scala |
-|---|---|---|---|
-| `pure` — isEven/isOdd, 1000 binds | 3.08 | 19.95 | 6.5× |
-| `answered` — an operation answered in place, each step | 5.58 | 37.69 | 6.8× |
-| `general` — a `deep` handler, `k` each step | 9.44 | 82.64 | 8.8× |
-| `forwarded` / `forwarded16` — past 1 / 16 handlers | 5.53 / 5.83 | 36.89 / 48.18 | 6.7× / 8.3× |
-| `forwardedK` / `forwardedK16` | 20.28 / 139.80 | 84.43 / 197.29 | 4.2× / 1.4× |
-| `reads` / `writer` | 3.15 / 9.45 | 29.61 / 31.59 | 9.4× / 3.3× |
-| `stateCell` / `state` / `stateDeep` | 9.34 / 12.47 / 12.02 | 71.60 / 72.56 / 80.13 | 7.7× / 5.8× / 6.7× |
-| `leftMaps` / `rightMaps` | 4.92 / 7.75 | 31.77 / 36.55 | 6.5× / 4.7× |
-| `throwing` — a handler in the program, each raise | 20.23 | 139.58 | 6.9× |
-| `choose` — every value of a choice among 1000 | 13.24 | 124.41 | 9.4× |
+| lane | Scala (okay-core, JVM 26) | Rust, first port | Rust, now | now / Scala |
+|---|---|---|---|---|
+| `pure` — isEven/isOdd, 1000 binds | 3.08 | 19.95 | 7.1–9.7 | 2.3–3.1× |
+| `answered` — an operation answered in place, each step | 5.58 | 37.69 | 10.1 | 1.8× |
+| `forwarded` / `forwarded16` — past 1 / 16 handlers | 5.53 / 5.83 | 36.89 / 48.18 | 10.2 / 12.3 | 1.8× / 2.1× |
+| `general` — a `deep` handler, `k` each step | 9.44 | 82.64 | 42.0 | 4.4× |
+| `forwardedK` / `forwardedK16` | 20.28 / 139.80 | 84.43 / 197.29 | 45.1 / 89.3 | 2.2× / **0.64×** |
+| `reads` / `writer` | 3.15 / 9.45 | 29.61 / 31.59 | 10.1 / 10.8 | 3.2× / 1.1× |
+| `stateCell` / `state` / `stateDeep` | 9.34 / 12.47 / 12.02 | 71.60 / 72.56 / 80.13 | 36.0 / 44.5 / 45.3 | 3.6–3.9× |
+| `leftMaps` / `rightMaps` | 4.92 / 7.75 | 31.77 / 36.55 | 22.7 / 28.6 | 4.6× / 3.7× |
+| `throwing` — an aborting handler in the program, each raise | 20.23 | 139.58 | 97.4 | 4.8× |
+| `choose` — every value of a choice among 1000 | 13.24 | 124.41 | 113.5 | 8.6× |
 
-**Rust is 4–9× slower today.** Not the language: the machine as written. Each step allocates — a `Box<Node>` for the
-program bound, an `Rc<dyn Fn>` frame, a `Box<dyn Any>` value, `Vec` pushes of the level stack — through the system
-`malloc`, where the JVM bumps a pointer and C2 removes many objects altogether. With mimalloc as the allocator the
-lanes are 1.6–1.8× faster (`pure` 12.8, `answered` 21.6, `general` 46.3, `state` 44.5, `choose` 75.2) — still
-3.5–6× behind: the count of allocations and the dynamic calls are the rest. `forwardedK16`, where Scala rebuilds
-sixteen levels into `k` each step, is the closest (1.4×).
+"Now" is single runs during the work (2026-10-14; an interleaved A/B of every step is under way). What made it so,
+each step measured, the ones that lost reverted:
 
-What would close it, in order: values unboxed in the common case (a small-value slot instead of `Box<dyn Any>`),
-frames `FnOnce` and moved when no `k` shares them (an `Rc` only for multi-shot), the program's nodes from an arena,
-the handler found by an index cached on the operation (as okay-core's path cache) instead of a `TypeId` search.
+1. **Small values in place**: a value up to 16 bytes with nothing to drop (`i64`, `bool`, `()`, an operation of
+   such) kept in the node — no `Box<dyn Any>`; its `TypeId` checked as `downcast` does.
+2. **Fused nodes**: `perform(op).flat_map(f)` one node (`Inject`) — answered in place, the value straight into `f`,
+   no frame pushed; `pure(a).flat_map(f)` one node (`Then`).
+3. **An operation's node small**: its effect's `TypeId`, its value, and one reference to a table made at compile time
+   (its name, describe, copy) — not six fields: a smaller node moved at each step.
+4. **Frames in place**: a bind's closure up to 24 bytes kept in the frame — no allocation; taken into a rest `k`,
+   moved behind an `Rc` there, once — so a closure is never cloned, and need not be `Clone`.
+5. **One-shot `k` moved back**: a rest resumed by its last holder (a handler resuming once — most) puts its levels
+   back as they are, nothing copied; copies, frames shared, only when it is resumed again.
+6. **`Handler::aborting`**: a handler dropping the rest (okay-core's `Aborting`; `either()` is one) truncates the
+   levels, no `k` made.
+
+Tried and not kept: the frames of a bind as a list in the node (every lane but `leftMaps` 30–55% slower: a bigger node
+moved each step); frames cloned with `k` (a choice among 1000 cloned its `Vec` at each resumption, 2× slower).
+
+What is left: `malloc` itself — macOS's allocator is where the time goes now (with mimalloc as the global allocator
+the first port was 1.6–1.8× faster); the levels and frames of a rest copied when it is resumed many times (`choose`);
+a nested `flat_map` still a boxed node (`leftMaps`, `state`).
 
 ## Next
 
