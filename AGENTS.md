@@ -12,7 +12,7 @@
 - The machine (`machine.rs`) is erased: values `Box<dyn Any>`, taken back at the type they were made at — the typed
   API allows no other (Rust has no GADTs: okay-one's typed loop is not portable). An operation goes to the nearest
   level of its effect by `TypeId`; an effect is once in a row (a second would make `Member`'s index ambiguous).
-- Frames are `Fn`, not `FnOnce`: a `k` is multi-shot. So `eff!` clones the names bound before each rest — a name
+- Frames are `Fn`, not `FnOnce`: a `k` is multi-shot. So `eff! { data; … }` clones the names bound before each rest — a name
   bound is `Clone`.
 - Tests are okay-core's kernel's, named after them (`tests/std.rs` = TestStd, `tests/acceptance.rs` = TestAcceptance); port the
   next ones the same way.

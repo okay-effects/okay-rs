@@ -9,7 +9,7 @@ use okay::*;
 type S = State<i64>;
 
 fn counted<R: Member<Choose, I1> + Member<S, I2> + 'static, I1: 'static, I2: 'static>() -> Eff<R, i64> {
-    eff! {
+    eff! { data;
         x <- among::<i64, R, I1>(vec![1, 2, 3]);
         s <- get::<i64, R, I2>();
         _ <- put::<i64, R, I2>(s + x);
@@ -80,7 +80,7 @@ fn ad_the_rests_resumed_in_reverse_each_its_state_as_it_was() {
         })
     }
     fn picked<R: Member<Two, I1> + Member<S, I2> + 'static, I1: 'static, I2: 'static>() -> Eff<R, i64> {
-        eff! {
+        eff! { data;
             s <- get::<i64, R, I2>();
             x <- perform::<R, Two, I1, i64>(Two::Pick);
             _ <- put::<i64, R, I2>(s + x);

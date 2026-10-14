@@ -1,4 +1,4 @@
-//! ONE API, COMPILED BY THE HANDLER'S TYPE: a program written with `eff! { async; … }` is an `async` block — a state
+//! ONE API, COMPILED BY THE HANDLER'S TYPE: a program written with `eff! { … }` is an `async` block — a state
 //! machine the compiler builds, generic over its context `cx`, the handlers in force. Monomorphized for the handlers it
 //! runs under: an operation of a handler answering in place is `Ready` at once — inlined, a call of the handler; one
 //! dropping the rest ends the block (`either`); one taking the rest once suspends it — the state machine itself the
@@ -11,11 +11,11 @@
 //!
 //! async fn counted<C, I1, I2, I3>(cx: &C, n: i64) -> i64
 //! where C: Has<Reader<i64>, I1> + Has<State<i64>, I2> + Has<Writer<String>, I3> {
-//!     eff! { async;
-//!         d <- ask::<i64, _, _>(cx);
-//!         _ <- modify::<i64, _, _>(cx, |s| s + d * n);
-//!         s <- get::<i64, _, _>(cx);
-//!         _ <- tell::<String, _, _>(cx, format!("s {s}"));
+//!     eff! {
+//!         d <- ask(cx);
+//!         _ <- modify(cx, |s| s + d * n);
+//!         s <- get(cx);
+//!         _ <- tell(cx, format!("s {s}"));
 //!         yield s
 //!     }.await
 //! }

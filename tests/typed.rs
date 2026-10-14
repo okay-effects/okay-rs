@@ -1,4 +1,4 @@
-//! ONE API COMPILED BY THE HANDLER'S TYPE (okay::typed): programs written once with `eff! { async; … }`, run under
+//! ONE API COMPILED BY THE HANDLER'S TYPE (okay::typed): programs written once with `eff! { … }`, run under
 //! handlers answering in place, dropping the rest, taking it once; a sensitive effect only under its audit
 
 use std::cell::RefCell;
@@ -12,11 +12,11 @@ async fn counted<C, I1, I2, I3>(cx: &C, n: i64) -> i64
 where
     C: Has<Reader<i64>, I1> + Has<State<i64>, I2> + Has<Writer<String>, I3>,
 {
-    eff! { async;
-        d <- ask::<i64, _, _>(cx);
-        _ <- modify::<i64, _, _>(cx, |s| s + d * n);
-        s <- get::<i64, _, _>(cx);
-        _ <- tell::<String, _, _>(cx, format!("s {s}"));
+    eff! {
+        d <- ask(cx);
+        _ <- modify(cx, |s| s + d * n);
+        s <- get(cx);
+        _ <- tell(cx, format!("s {s}"));
         yield s
     }
     .await
@@ -48,8 +48,8 @@ fn either_the_error_raised_the_rest_of_the_body_dropped() {
     let cx = Cx(StateCell::new(0i64), End);
     let after = RefCell::new(false);
     let r: Result<Result<i64, String>, Stuck> = run(either(&cx, async |cx| {
-        put::<i64, _, _>(cx, 1).await;
-        let _: () = raise::<String, (), _, _>(cx, "no".to_string()).await;
+        put(cx, 1).await;
+        let _: () = raise(cx, "no".to_string()).await;
         *after.borrow_mut() = true;
         7
     }));
@@ -66,7 +66,7 @@ fn a_raise_in_a_loop_each_under_its_own_either() {
         let mut acc = 0;
         for i in 0..10 {
             let r: Result<i64, String> = either(&cx, async |cx| {
-                if i % 2 == 0 { raise::<String, i64, _, _>(cx, "even".to_string()).await } else { i }
+                if i % 2 == 0 { raise(cx, "even".to_string()).await } else { i }
             })
             .await;
             acc += r.unwrap_or(100);
@@ -83,9 +83,9 @@ fn a_generator_each_value_as_it_comes_the_body_resumed_once() {
     let seen = RefCell::new(Vec::new());
     let done = run(generate(&cx, |v: i64| seen.borrow_mut().push(v), async |cx| {
         for i in 1..=5 {
-            modify::<i64, _, _>(cx, |s| s + i).await;
-            let s = get::<i64, _, _>(cx).await;
-            emit::<i64, _, _>(cx, s).await;
+            modify(cx, |s| s + i).await;
+            let s = get(cx).await;
+            emit(cx, s).await;
         }
         "done"
     }));
@@ -142,8 +142,8 @@ fn a_sensitive_effect_under_its_audit() {
         Audited { handler: Bank(RefCell::new(1000)), interceptor: Guard { limit: 1000, trail: RefCell::new(vec![]) } },
         End,
     );
-    let c = &cx; // `eff! { async; … }` moves what it uses: a reference to the context
-    let r: Result<Result<String, String>, Stuck> = run(eff! { async;
+    let c = &cx; // `eff! { … }` moves what it uses: a reference to the context
+    let r: Result<Result<String, String>, Stuck> = run(eff! {
         a <- transfer(c, " acct-1 ", 100);
         b <- transfer(c, "acct-2", 5000);
         yield a.and(b)

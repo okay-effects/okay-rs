@@ -27,10 +27,10 @@ fn mutual_tail_recursion_by_call_a_million_steps() {
 
 type Counted = row![State<i64>];
 fn even_counted(i: i64) -> Eff<Counted, bool> {
-    if i == 0 { pure(true) } else { eff! { modify::<i64, _, _>(|s| s + 1); call!(odd_counted(i - 1)) } }
+    if i == 0 { pure(true) } else { eff! { data; modify::<i64, _, _>(|s| s + 1); call!(odd_counted(i - 1)) } }
 }
 fn odd_counted(i: i64) -> Eff<Counted, bool> {
-    if i == 0 { pure(false) } else { eff! { modify::<i64, _, _>(|s| s + 1); call!(even_counted(i - 1)) } }
+    if i == 0 { pure(false) } else { eff! { data; modify::<i64, _, _>(|s| s + 1); call!(even_counted(i - 1)) } }
 }
 
 /// "mutual tail recursion with a state at each step: a million operations"

@@ -10,7 +10,7 @@ use okay::*;
 use okay::effects::*;
 
 type R = row![Reader<i64>, State<i64>];
-let p: Eff<R, i64> = eff! {
+let p: Eff<R, i64> = eff! { data;
     n <- ask::<i64, _, _>();
     _ <- modify::<i64, _, _>(move |s| s + n);
     s <- get::<i64, _, _>();
@@ -75,7 +75,8 @@ The standard effects (`okay::effects`): `Reader<V>` (`ask`, `reader`), `State<S>
 `Eff<R, A>`: a program of value `A` over the row `R`. `pure(a)`, `perform(…)`, `p.flat_map(f)`, `p.map(f)`,
 `p.handle(h)`, `p.run()` (only for `Eff<Nil, A>`: every effect handled).
 
-`eff!` is a for over programs: `x <- p;` binds, `_ <- p;` or `p;` drops, `let x = v;` names, the last line a program
+`eff! { data; … }` is a for over programs as data (`eff! { … }` without `data;` is the `async` form, see
+[One API](#one-api-compiled-by-the-handlers-type-okaytyped)): `x <- p;` binds, `_ <- p;` or `p;` drops, `let x = v;` names, the last line a program
 or `yield v`. The rests are `Fn` closures — a handler may resume them many times — so each takes copies (`clone`) of
 the names bound before it: a name bound is `Clone`. `flat_map` is typed by a trait, `Bind<N>`: the answer met chosen
 by the kind of the rest, so that answer-type modification (`Cont`, stage 2) binds with no specialization.
@@ -98,7 +99,7 @@ assert!(is_even(1_000_000).run());
 
 // an effect at each step: a million operations of a state
 fn even_counted(i: i64) -> Eff<row![State<i64>], bool> {
-    if i == 0 { pure(true) } else { eff! { modify::<i64, _, _>(|s| s + 1); call!(odd_counted(i - 1)) } }
+    if i == 0 { pure(true) } else { eff! { data; modify::<i64, _, _>(|s| s + 1); call!(odd_counted(i - 1)) } }
 }
 
 enum Call { Even(i64), Odd(i64) }
@@ -189,7 +190,7 @@ Checked by `compile_fail` doc tests (`src/lib.rs`, `src/audit.rs`), each failing
 
 ## One API, compiled by the handler's type (`okay::typed`)
 
-The same `eff!`, one more form: `eff! { async; x <- op(cx); …; yield v }` is an `async` block — a state machine the
+`eff! { x <- op(cx); …; yield v }` — the default form of `eff!` — is an `async` block: a state machine the
 compiler builds, generic over its context `cx` (the handlers in force, `Cx(h, rest)`, each effect found by its type as
 in a row). Monomorphized for the handlers it runs under, an operation is compiled by what its handler is:
 
@@ -197,16 +198,19 @@ in a row). Monomorphized for the handlers it runs under, an operation is compile
 - dropping the rest (`either`): the body's future dropped where it raised;
 - taking the rest once (`generate`): the block suspended, resumed once — the state machine itself the `k`, nothing on
   the heap;
-- taking it many times (`choose`): not yet — the machine (`Eff`), or a replay of the program, next.
+- taking it many times (`choose`): not yet — the machine (`eff! { data; … }`, a program as data), or a replay of
+  the program, next.
+
+No turbofish: an operation's type is inferred from the context's bounds (`Has<Reader<i64>, _>`) or its argument.
 
 ```rust
 async fn counted<C, I1, I2, I3>(cx: &C, n: i64) -> i64
 where C: Has<Reader<i64>, I1> + Has<State<i64>, I2> + Has<Writer<String>, I3> {
-    eff! { async;
-        d <- ask::<i64, _, _>(cx);
-        _ <- modify::<i64, _, _>(cx, |s| s + d * n);
-        s <- get::<i64, _, _>(cx);
-        _ <- tell::<String, _, _>(cx, format!("s {s}"));
+    eff! {
+        d <- ask(cx);
+        _ <- modify(cx, |s| s + d * n);
+        s <- get(cx);
+        _ <- tell(cx, format!("s {s}"));
         yield s
     }.await
 }
@@ -222,7 +226,7 @@ audit.
 
 µs per 1000 operations, the same lanes:
 
-| lane | Scala (okay-core) | the machine (`Eff`) | `eff! { async }` |
+| lane | Scala (okay-core) | the machine (`Eff`) | `eff! { … }` |
 |---|---|---|---|
 | `answered` | 5.58 | 10.3 | **0.25** |
 | `reads` (the context opaque) | 3.15 | 9.8 | **0.27** |

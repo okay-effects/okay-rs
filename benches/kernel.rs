@@ -335,7 +335,7 @@ mod direct {
     }
 }
 
-// ONE API COMPILED BY THE HANDLER'S TYPE (okay::typed): the same programs, eff! { async; … }
+// ONE API COMPILED BY THE HANDLER'S TYPE (okay::typed): the same programs, eff! { … }
 
 mod typed {
     use std::cell::RefCell;
@@ -369,7 +369,7 @@ mod typed {
         // isEven/isOdd as one loop: an async recursion is boxed at each call
         let (mut i, mut even) = (n, true);
         while i > 0 {
-            black_box(eff! { async; perform::<_, Tick, _, i64>(cx, |r| Tick::Value(i, r)) }.await);
+            black_box(eff! { perform::<_, Tick, _, i64>(cx, |r| Tick::Value(i, r)) }.await);
             i -= 1;
             even = !even;
         }
@@ -380,7 +380,7 @@ mod typed {
     async fn asks<C: Has<Reader<i64>, I>, I>(cx: &C, n: i64) -> i64 {
         let mut acc = 0;
         for _ in 0..n {
-            acc += eff! { async; ask::<i64, _, _>(cx) }.await;
+            acc += eff! { ask(cx) }.await;
         }
         acc
     }
@@ -388,7 +388,7 @@ mod typed {
 
     async fn telling<C: Has<Writer<i64>, I>, I>(cx: &C, n: i64) {
         for i in (1..=n).rev() {
-            eff! { async; tell::<i64, _, _>(cx, i) }.await;
+            eff! { tell(cx, i) }.await;
         }
     }
     pub fn writer() -> usize {
@@ -399,13 +399,13 @@ mod typed {
 
     async fn counting<C: Has<State<i64>, I>, I>(cx: &C, n: i64) -> i64 {
         for _ in 0..n {
-            eff! { async;
-                x <- get::<i64, _, _>(cx);
-                put::<i64, _, _>(cx, x + 1)
+            eff! {
+                x <- get(cx);
+                put(cx, x + 1)
             }
             .await;
         }
-        get::<i64, _, _>(cx).await
+        get(cx).await
     }
     pub fn state() -> i64 { run(counting(&Cx(StateCell::new(black_box(0i64)), End), black_box(N))).unwrap_or(0) }
     pub fn state_deep() -> i64 {
@@ -427,7 +427,7 @@ mod typed {
         let mut acc = 0;
         for _ in 0..n {
             let e: Result<i64, String> =
-                either(cx, async |cx| raise::<String, i64, _, _>(cx, "no".to_string()).await).await;
+                either(cx, async |cx| raise(cx, "no".to_string()).await).await;
             acc += e.unwrap_or_else(|s| s.len() as i64);
         }
         acc
@@ -439,7 +439,7 @@ mod typed {
         let sum = RefCell::new(0i64);
         let _ = run(generate(&End, |v: i64| *sum.borrow_mut() += v, async |cx| {
             for i in 0..black_box(N) {
-                emit::<i64, _, _>(cx, i).await;
+                emit(cx, i).await;
             }
         }));
         sum.into_inner()
