@@ -290,6 +290,13 @@ impl<T> Debug for Reply<T> {
 /// the value given to an operation, erased: made by a `Reply`
 pub struct Answer(pub(crate) Val);
 
+impl<T> Reply<T> {
+    /// a reply, made by a performer: the machine's `perform`, level 1's operations
+    pub(crate) fn new() -> Self {
+        Reply(PhantomData)
+    }
+}
+
 impl<T: 'static> Reply<T> {
     /// the operation's value `t`
     pub fn give(self, t: T) -> Answer {

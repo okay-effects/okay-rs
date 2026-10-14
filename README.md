@@ -187,6 +187,53 @@ Checked by `compile_fail` doc tests (`src/lib.rs`, `src/audit.rs`), each failing
 - **Known gap**: a `Reply` kept from one operation and given to another panics (a value taken at another type);
   closing it wants the reply branded by a lifetime.
 
+## One API, compiled by the handler's type (`okay::typed`)
+
+The same `eff!`, one more form: `eff! { async; x <- op(cx); …; yield v }` is an `async` block — a state machine the
+compiler builds, generic over its context `cx` (the handlers in force, `Cx(h, rest)`, each effect found by its type as
+in a row). Monomorphized for the handlers it runs under, an operation is compiled by what its handler is:
+
+- answering in place (a reader, a state, a writer, an audit): `Ready` at once — inlined, a call of the handler;
+- dropping the rest (`either`): the body's future dropped where it raised;
+- taking the rest once (`generate`): the block suspended, resumed once — the state machine itself the `k`, nothing on
+  the heap;
+- taking it many times (`choose`): not yet — the machine (`Eff`), or a replay of the program, next.
+
+```rust
+async fn counted<C, I1, I2, I3>(cx: &C, n: i64) -> i64
+where C: Has<Reader<i64>, I1> + Has<State<i64>, I2> + Has<Writer<String>, I3> {
+    eff! { async;
+        d <- ask::<i64, _, _>(cx);
+        _ <- modify::<i64, _, _>(cx, |s| s + d * n);
+        s <- get::<i64, _, _>(cx);
+        _ <- tell::<String, _, _>(cx, format!("s {s}"));
+        yield s
+    }.await
+}
+let cx = Cx(AskWith(2i64), Cx(StateCell::new(1i64), Cx(Collect::<String>::new(), End)));
+assert_eq!(run(counted(&cx, 10)), Ok(21));
+```
+
+The effects are the machine's own enums (`Reader`, `State`, `Writer`, `Throws`); a handler implements `Handles<E>`,
+answering `Step::Now(reply.give(v))` or taking the rest `Step::Later`. A sensitive effect is in a context only as
+`Audited { handler, interceptor }` (sealed: a bare bank's context does not compile). `tests/typed.rs`: one program
+under two contexts, either, a raise in a loop each under its own either, a generator with a state in it, the payments
+audit.
+
+µs per 1000 operations, the same lanes:
+
+| lane | Scala (okay-core) | the machine (`Eff`) | `eff! { async }` |
+|---|---|---|---|
+| `answered` | 5.58 | 10.3 | **0.25** |
+| `reads` (the context opaque) | 3.15 | 9.8 | **0.27** |
+| `state` (the context opaque; 2000 operations) | 12.47 | 42.0 | **1.77** |
+| `writer` | 9.45 | 11.3 | **1.07** |
+| `throwing` — each raise under its own either | 20.23 | 94.7 | **7.66** |
+| a generator, 1000 values, the body suspended and resumed at each | 22.6 (okay-one's `generate`) | — | **2.14** |
+
+With the context visible, LLVM folds the loops of `reads` and `state` altogether (0.017). Open: many-shot `k` (replay,
+or the machine) — then the machine is only what replay cannot do.
+
 ## Level 1: effects passed down, direct style
 
 The principled answer to the speed of level 2 (below): most effects — a reader, a state, a writer, a log, an audit —

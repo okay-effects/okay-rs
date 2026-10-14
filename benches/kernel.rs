@@ -335,6 +335,117 @@ mod direct {
     }
 }
 
+// ONE API COMPILED BY THE HANDLER'S TYPE (okay::typed): the same programs, eff! { async; … }
+
+mod typed {
+    use std::cell::RefCell;
+    use std::hint::black_box;
+
+    use okay::eff;
+    use okay::effects::{Reader, State, Writer};
+    use okay::typed::*;
+    use okay::{Effect, Plain, Reply};
+
+    use super::N;
+
+    #[derive(Clone, Debug)]
+    pub enum Tick {
+        Value(i64, Reply<i64>),
+    }
+    impl Effect for Tick {
+        type Kind = Plain;
+    }
+    pub struct Ticking;
+    impl Handles<Tick> for Ticking {
+        #[inline(always)]
+        fn handle(&self, op: Tick) -> Step {
+            match op {
+                Tick::Value(i, r) => Step::Now(r.give(i)),
+            }
+        }
+    }
+
+    async fn is_even<C: Has<Tick, I>, I>(cx: &C, n: i64) -> bool {
+        // isEven/isOdd as one loop: an async recursion is boxed at each call
+        let (mut i, mut even) = (n, true);
+        while i > 0 {
+            black_box(eff! { async; perform::<_, Tick, _, i64>(cx, |r| Tick::Value(i, r)) }.await);
+            i -= 1;
+            even = !even;
+        }
+        even
+    }
+    pub fn answered() -> bool { run(is_even(&Cx(Ticking, End), black_box(N))).unwrap_or(false) }
+
+    async fn asks<C: Has<Reader<i64>, I>, I>(cx: &C, n: i64) -> i64 {
+        let mut acc = 0;
+        for _ in 0..n {
+            acc += eff! { async; ask::<i64, _, _>(cx) }.await;
+        }
+        acc
+    }
+    pub fn reads() -> i64 { run(asks(&Cx(AskWith(black_box(1i64)), End), black_box(N))).unwrap_or(0) }
+
+    async fn telling<C: Has<Writer<i64>, I>, I>(cx: &C, n: i64) {
+        for i in (1..=n).rev() {
+            eff! { async; tell::<i64, _, _>(cx, i) }.await;
+        }
+    }
+    pub fn writer() -> usize {
+        let cx = Cx(Collect::<i64>::new(), End);
+        let _ = run(telling(&cx, black_box(N)));
+        cx.0.take().len()
+    }
+
+    async fn counting<C: Has<State<i64>, I>, I>(cx: &C, n: i64) -> i64 {
+        for _ in 0..n {
+            eff! { async;
+                x <- get::<i64, _, _>(cx);
+                put::<i64, _, _>(cx, x + 1)
+            }
+            .await;
+        }
+        get::<i64, _, _>(cx).await
+    }
+    pub fn state() -> i64 { run(counting(&Cx(StateCell::new(black_box(0i64)), End), black_box(N))).unwrap_or(0) }
+    pub fn state_deep() -> i64 {
+        let cx = Cx(StateCell::new(black_box(0i64)), Cx(AskWith(0i64), Cx(Collect::<i64>::new(), End)));
+        run(counting(&cx, black_box(N))).unwrap_or(0)
+    }
+    /// the context opaque to the loop (behind `black_box`): each get and put a load and a store of the state, not
+    /// folded away
+    pub fn state_opaque() -> i64 {
+        let cx = Cx(StateCell::new(0i64), End);
+        run(counting(black_box(&cx), black_box(N))).unwrap_or(0)
+    }
+    pub fn reads_opaque() -> i64 {
+        let cx = Cx(AskWith(1i64), End);
+        run(asks(black_box(&cx), black_box(N))).unwrap_or(0)
+    }
+
+    async fn raising<C>(cx: &C, n: i64) -> i64 {
+        let mut acc = 0;
+        for _ in 0..n {
+            let e: Result<i64, String> =
+                either(cx, async |cx| raise::<String, i64, _, _>(cx, "no".to_string()).await).await;
+            acc += e.unwrap_or_else(|s| s.len() as i64);
+        }
+        acc
+    }
+    pub fn throwing() -> i64 { run(raising(&End, black_box(N))).unwrap_or(0) }
+
+    /// a generator pulled: 1000 values, each the body suspended and resumed once
+    pub fn generate_() -> i64 {
+        let sum = RefCell::new(0i64);
+        let _ = run(generate(&End, |v: i64| *sum.borrow_mut() += v, async |cx| {
+            for i in 0..black_box(N) {
+                emit::<i64, _, _>(cx, i).await;
+            }
+        }));
+        sum.into_inner()
+    }
+}
+
 // THE HARNESS: JMH's AverageTime — warm-up, then rounds of a second, µs a run
 
 fn lane(name: &str, f: &dyn Fn() -> u64) {
@@ -387,12 +498,25 @@ fn main() {
         ("D:stateDeep", Box::new(|| direct::state_deep() as u64)),
         ("D:stateDyn", Box::new(|| direct::state_dyn() as u64)),
         ("D:readsDyn", Box::new(|| direct::reads_dyn() as u64)),
+        ("T:answered", Box::new(|| typed::answered() as u64)),
+        ("T:reads", Box::new(|| typed::reads() as u64)),
+        ("T:writer", Box::new(|| typed::writer() as u64)),
+        ("T:state", Box::new(|| typed::state() as u64)),
+        ("T:stateDeep", Box::new(|| typed::state_deep() as u64)),
+        ("T:stateOpaque", Box::new(|| typed::state_opaque() as u64)),
+        ("T:readsOpaque", Box::new(|| typed::reads_opaque() as u64)),
+        ("T:throwing", Box::new(|| typed::throwing() as u64)),
+        ("T:generate", Box::new(|| typed::generate_() as u64)),
     ];
     // each lane's answer, the Scala lanes' own
     assert!(answered() && general() && forwarded() && forwarded16() && forwarded_k() && forwarded_k16());
     assert_eq!((reads(), writer(), state_cell(), state(), state_deep()), (N, N as usize, N, N, N));
     assert_eq!((left_maps(), right_maps(), throwing(), throwing_k(), choose()), (N, N, 2 * N, 2 * N, N as usize));
     assert!(direct::answered());
+    assert!(typed::answered());
+    assert_eq!((typed::reads(), typed::writer(), typed::state(), typed::state_deep(), typed::throwing(), typed::generate_()),
+        (N, N as usize, N, N, 2 * N, N * (N - 1) / 2));
+    assert_eq!((typed::state_opaque(), typed::reads_opaque()), (N, N));
     assert_eq!((direct::reads(), direct::writer(), direct::state(), direct::state_deep(), direct::state_dyn(), direct::reads_dyn()), (N, N as usize, N, N, N, N));
     for (name, f) in &lanes {
         if only.is_empty() || only.iter().any(|o| o == name) {

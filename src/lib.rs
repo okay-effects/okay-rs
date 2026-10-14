@@ -45,6 +45,7 @@ mod val;
 
 pub mod audit;
 pub mod direct;
+pub mod typed;
 
 pub use eff::{defer, perform, pure, tail_rec, Loop, Answer, AnyOp, Bind, Eff, Never, Node, Pass, Program, Reply};
 pub use handler::{Handler, Interceptor, Observer, K};
@@ -65,6 +66,14 @@ macro_rules! call {
 /// copies (`clone`) of the names bound before it — so a name bound is `Clone`.
 #[macro_export]
 macro_rules! eff {
+    // ONE API COMPILED BY THE HANDLER'S TYPE (okay::typed): `eff! { async; x <- op(cx); … yield v }` an `async` block
+    (async; $($t:tt)+) => { async move { $crate::eff!(@async $($t)+) } };
+    (@async yield $e:expr) => { $e };
+    (@async _ <- $e:expr ; $($rest:tt)+) => {{ ($e).await; $crate::eff!(@async $($rest)+) }};
+    (@async let $x:ident = $v:expr ; $($rest:tt)+) => {{ let $x = $v; $crate::eff!(@async $($rest)+) }};
+    (@async $x:ident <- $e:expr ; $($rest:tt)+) => {{ let $x = ($e).await; $crate::eff!(@async $($rest)+) }};
+    (@async $e:expr ; $($rest:tt)+) => {{ ($e).await; $crate::eff!(@async $($rest)+) }};
+    (@async $e:expr) => { ($e).await };
     (@ [$($b:ident)*] yield $e:expr) => {{
         $( #[allow(unused_variables, clippy::redundant_clone)] let $b = $b.clone(); )*
         $crate::pure($e)
