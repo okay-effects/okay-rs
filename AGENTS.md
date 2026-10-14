@@ -2,7 +2,7 @@
 
 - Rust 2024 (rustc 1.92), no dependencies; `cargo test` runs the unit, integration and doc tests (the doc tests hold
   the `compile_fail` checks: a row not handled has no `run`; an effect not in the row cannot be performed).
-- okay-one ported (~/work/my/okay-one is the specification): a program is DATA, `Eff<R, A>`, a tree of nodes; its
+- okay-core's kernel ported (`okay.one` in ~/work/my/okay-core is the specification; the okay-one repository is history): a program is DATA, `Eff<R, A>`, a tree of nodes; its
   effects a row `R` (`Cons<E, R>` … `Nil`, `row![…]`), an effect's place found by the compiler (`Member<E, Ix>`, the
   index `Here`/`There` never written); handlers values of three forms (`Handler::answering`, `stateful`, `deep`), not
   tied to the program; the rest `k` of a deep handler data (`K<T, B>`), resumed by the operation's `Reply`, as many
@@ -14,10 +14,9 @@
   level of its effect by `TypeId`; an effect is once in a row (a second would make `Member`'s index ambiguous).
 - Frames are `Fn`, not `FnOnce`: a `k` is multi-shot. So `eff!` clones the names bound before each rest — a name
   bound is `Clone`.
-- Tests are okay-one's, named after them (`tests/std.rs` = TestStd, `tests/acceptance.rs` = TestAcceptance); port the
+- Tests are okay-core's kernel's, named after them (`tests/std.rs` = TestStd, `tests/acceptance.rs` = TestAcceptance); port the
   next ones the same way.
-- INTERCEPTORS, the point of it all — control and audit of effects (`tests/intercept.rs` is the specification, to be
-  ported to okay-one with the same names):
+- INTERCEPTORS, the point of it all — control and audit of effects (`tests/intercept.rs` is the specification, the same programs as okay-core's TestIntercept):
   - an effect is `Plain` or `Sensitive` (`Effect::Kind`). A sensitive one is handled only by `handle_audited`, which
     needs `Audited<S>` in the row; only `audit` (an `Interceptor` of `S`) or `observe` puts it there, in the row
     outside them — where no program can perform `S`. A plain `handle`/`intercept` of it does not compile.

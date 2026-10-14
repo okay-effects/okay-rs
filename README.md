@@ -1,7 +1,9 @@
 # okay-rs
 
-okay-one in Rust: a program of effects is data (`Eff<R, A>`), its effects a row of types, its handlers values not
-tied to it, and the rest `k` data too: resumed any number of times, each time as it was taken.
+okay-core's kernel (`okay.one`) in Rust: a program of effects is DATA (`Eff<R, A>`, a tree of nodes), its effects a
+ROW of types, its handlers VALUES of three forms not tied to it, the rest `k` data too — resumed any number of times,
+each time as it was taken — and INTERCEPTORS for control and audit: a sensitive effect handled only under its audit,
+the types refusing anything else; an observer of every operation of every effect.
 
 ```rust
 use okay::*;
@@ -17,5 +19,141 @@ let p: Eff<R, i64> = eff! {
 assert_eq!(p.handle(reader(5)).handle(state(1)).run(), (6, 12));
 ```
 
-Stage 1: rows, `Eff`, the three handler forms, reader/state/writer/choose/throws, the machine, `eff!`; okay-one's
-TestStd and TestAcceptance pass. Stage 2: answer-type modification (`Cont`, `$`, `shift0`, `PState`).
+The specification is okay-core's kernel and its suites: each test here is one of okay-core's, named after it
+(`tests/std.rs` = TestStd, `tests/acceptance.rs` = TestAcceptance, `tests/intercept.rs` = TestIntercept).
+
+## Contents
+
+1. [Rows](#rows)
+2. [Effects and operations](#effects-and-operations)
+3. [Programs and `eff!`](#programs-and-eff)
+4. [Handlers](#handlers)
+5. [The machine](#the-machine)
+6. [Control and audit: interceptors](#control-and-audit-interceptors)
+7. [What the types refuse](#what-the-types-refuse)
+8. [What Rust costs, against Scala](#what-rust-costs-against-scala)
+9. [Next](#next)
+
+## Rows
+
+A row is a list of types: `Cons<E, R>` ending in `Nil`, written `row![A, B, C]`. An effect's place in a row is found
+by the compiler — `Member<E, Ix>`, its index `Here` or `There<I>` never written — and `Member::Rest` is the row
+without it: what a handler of `E` leaves. An effect is once in a row (a second would make the index ambiguous).
+
+## Effects and operations
+
+An effect is an enum of its operations; each variant carries its `Reply<T>`, `T` the operation's value:
+
+```rust
+#[derive(Clone, Debug)]
+pub enum State<S> {
+    Get(Reply<S>),
+    Put(S, Reply<()>),
+}
+impl<S: Clone + Debug + 'static> Effect for State<S> {
+    type Kind = Plain;
+}
+
+pub fn get<S: Clone + Debug + 'static, R: Member<State<S>, Ix>, Ix>() -> Eff<R, S> { perform(State::Get) }
+pub fn put<S: Clone + Debug + 'static, R: Member<State<S>, Ix>, Ix>(s: S) -> Eff<R, ()> {
+    perform(|r| State::Put(s, r))
+}
+```
+
+`perform(make)` gives `make` the reply and makes the operation; the reply is the ONLY way to its value — `r.give(v)`
+for a handler answering in place, `r.resume(&k, v)` for one taking the rest — so the value is the operation's type.
+An effect is `Clone + Debug` and an operation's value too: what crosses the boundary of effects can be told and kept
+(the observer needs both). `Kind` is `Plain` or `Sensitive` (see the interceptors).
+
+The standard effects (`okay::effects`): `Reader<V>` (`ask`, `reader`), `State<S>` (`get`, `put`, `modify`, `state`),
+`Writer<W>` (`tell`, `collect`), `Choose` (`among`, `flip`, `fail`, `all` — every path, multi-shot), `Throws<E>`
+(`raise`, `either`); `okay::audit::Audit` (`record`, `trail`).
+
+## Programs and `eff!`
+
+`Eff<R, A>`: a program of value `A` over the row `R`. `pure(a)`, `perform(…)`, `p.flat_map(f)`, `p.map(f)`,
+`p.handle(h)`, `p.run()` (only for `Eff<Nil, A>`: every effect handled).
+
+`eff!` is a for over programs: `x <- p;` binds, `_ <- p;` or `p;` drops, `let x = v;` names, the last line a program
+or `yield v`. The rests are `Fn` closures — a handler may resume them many times — so each takes copies (`clone`) of
+the names bound before it: a name bound is `Clone`. `flat_map` is typed by a trait, `Bind<N>`: the answer met chosen
+by the kind of the rest, so that answer-type modification (`Cont`, stage 2) binds with no specialization.
+
+## Handlers
+
+Three forms, each over the row `T` outside it, of the body's `A` to its own `B`:
+
+- `Handler::answering(value, ret)` — each operation its value at once, in place; nothing taken;
+- `Handler::stateful(s0, step, ret)` — a state `S`, each operation its value and the state moved, in place. Taken
+  into a rest, the state as it was then: each resumption its own (a choice's paths, each its state);
+- `Handler::deep(ret, apply)` — each operation its clause, given the rest `k: K<T, B>`, data: resumed none, once or
+  many times, kept, by the operation's `Reply`.
+
+`p.handle(h)` takes a PLAIN effect off wherever it is in the row.
+
+## The machine
+
+A loop over the nodes and a stack of levels, each a handler's (or the top) with the frames waiting inside it. An
+operation goes to the nearest level of its effect (by `TypeId`; the row says there is one): answered in place, the
+state moved in place, or — a handler taking the rest — the levels from it up taken off as `k` and its clause run
+outside them. A `k` resumed: its levels pushed back, copies, each state as it was (a state is written in place when
+no `k` holds it, copied when one does). No recursion: binds nested to any depth (100 000 in the tests) on a heap stack.
+
+The machine is ERASED: values are `Box<dyn Any>`, each taken back at the type it was made at — the typed API allows
+no other. Rust has no GADTs, so okay-core's loop typed by the answers is not portable; the casts are three, inside
+(`take`, `take_op`, `state`), and their panics unreachable from a typed program.
+
+## Control and audit: interceptors
+
+THE POINT OF IT ALL (okay-core's `docs/intercept.md` is the full account; the same programs there):
+
+- an effect is `Plain` or `Sensitive` (`Effect::Kind`). A sensitive one is handled only by `handle_audited`, which
+  needs `Audited<S>` in the row — put there only by `audit` or `observe`, in the row outside them, where no program
+  can perform `S` (`Audited<S>` is not an effect);
+- `p.intercept(h)`: a plain effect handled again for a part of a program — its clauses outside it, their own
+  operations of the effect reaching the handler further out;
+- `p.audit::<S, _, _>(i)`: an `Interceptor` of a sensitive effect, its clauses given `Pass<S>`, the only way to
+  perform `S` past the audit — each operation told, passed on as it is or changed, refused; its answer changed;
+- `p.observe(o)`: an `Observer` of every operation of every effect on its way out — `AnyOp`: `effect()` (the type's
+  name), `describe()` (its `Debug`), `proceed(&k)`, `proceed_then(&k, after)` (its answer told each time the rest
+  gets it) — or refused; outside, every sensitive effect of the row audited (`AuditAll`);
+- the trail is an effect, `audit::Audit` (`record`, handled by `trail()`), outside the interceptors.
+
+```rust
+// every operation and its answer told: a reader, a state, a sensitive payment
+fn telling<T: Member<Audit, I> + 'static, I: 'static, A: 'static>() -> Observer<T, A, A> {
+    Observer::new(pure, |op, k| {
+        let line = format!("{} {}", op.effect(), op.describe());
+        record::<T, I>(line).flat_map(move |_| op.clone().proceed_then(&k, |a| record::<T, I>(format!("  → {a}"))))
+    })
+}
+p.observe(telling()).handle(reader(5)).handle(state(1)).handle_audited::<Pay, _, _>(bank(100)).handle(trail()).run()
+// trail: ["Reader<i64> Ask(_)", "  → 5", "State<i64> Get(_)", "  → 1", "State<i64> Put(6, _)", "  → ()", …]
+```
+
+## What the types refuse
+
+Checked by `compile_fail` doc tests (`src/lib.rs`, `src/audit.rs`), each failing for its own reason:
+
+| refused | the compiler's message |
+|---|---|
+| `run` with an effect not handled | no method `run` for `Eff<Cons<…>, _>` |
+| an operation of an effect not in the row | the effect `State<i64>` is not in the row … |
+| a sensitive effect by `handle`, or `intercept` | a sensitive effect is handled only under its audit — audit it first, then `handle_audited` |
+| `handle_audited` with no audit before it | `Member<Audited<Pay>, _>` not satisfied |
+| a sensitive operation outside its audit | the effect `Pay` is not in the row … a sensitive effect outside its audit is `Audited<Pay>` |
+
+## What Rust costs, against Scala
+
+- **The erased machine** (no GADTs): typed outside, three casts inside.
+- **`Fn` rests**: `k` is multi-shot, so frames are `Fn`, and names bound in `eff!` are `Clone`; a program value is
+  single-use (build it inside the closure that needs it).
+- **Turbofish**: `ask::<i64, _, _>()` — the effect's type named, the row and the index inferred.
+- **Known gap**: a `Reply` kept from one operation and given to another panics (a value taken at another type);
+  closing it wants the reply branded by a lifetime.
+
+## Next
+
+Stage 2: answer-type modification — `Cont<R, I, O, A>`, `$`/`reset`, `shift0`, `PState` and the protocol of
+okay-core's `TestAtmUses` — the `Bind` impls for the four pairs of `Eff`/`Cont`, no overlap; `on_unimplemented` for
+answers that do not meet.
