@@ -44,6 +44,7 @@ mod row;
 mod val;
 
 pub mod audit;
+pub mod direct;
 
 pub use eff::{defer, perform, pure, tail_rec, Loop, Answer, AnyOp, Bind, Eff, Never, Node, Pass, Program, Reply};
 pub use handler::{Handler, Interceptor, Observer, K};

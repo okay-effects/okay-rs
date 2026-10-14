@@ -187,6 +187,51 @@ Checked by `compile_fail` doc tests (`src/lib.rs`, `src/audit.rs`), each failing
 - **Known gap**: a `Reply` kept from one operation and given to another panics (a value taken at another type);
   closing it wants the reply branded by a lifetime.
 
+## Level 1: effects passed down, direct style
+
+The principled answer to the speed of level 2 (below): most effects — a reader, a state, a writer, a log, an audit —
+answer and go on, they never need `k`; for them a program as data is pure cost. `okay::direct` (a prototype) passes
+them DOWN as parameters, as Koka and Effekt do (evidence passing): an effect is a trait, its handler a value, a
+program a generic function whose signature is its row, an operation a call of the handler's method — monomorphized,
+inlined, no node, no allocation. The effects that take the rest (a choice resumed twice, a generator, async) stay on
+the machine, level 2.
+
+```rust
+use okay::direct::*;
+
+fn counting(st: &mut impl State<i64>, log: &mut impl Writer<String>, n: i64) -> i64 {
+    for _ in 0..n { let x = st.get(); st.put(x + 1); }
+    log.tell(format!("counted {n}"));
+    st.get()
+}
+let (mut st, mut log) = (Cell(0), Log::new());
+assert_eq!(counting(&mut st, &mut log, 1000), 1000);
+```
+
+- an interceptor is a wrapper of a handler (`InterceptWriter`);
+- a SENSITIVE effect's trait asks `AuditedOnly` (`pub trait Pay: AuditedOnly`), sealed — implemented by okay's
+  `Audited` and `Observed` alone: a bank's handler reaches a program only through `audit(&mut bank, policy)` or
+  `observe(&mut bank, &observer)`; given bare, "`MyBank` is not under an audit";
+- an observer (`Observed`, one `Trail` shared by many handlers) tells every operation and its answer;
+- an error is `Result` and `?`: in direct style an abort costs nothing.
+
+`tests/direct.rs`: tests/intercept.rs's programs — the payments audit (limit, normalized account, masked trail), a
+plain intercept, the observer of a reader, a state and payments — the same trails.
+
+The same lanes, µs per 1000 operations:
+
+| lane | Scala (okay-core) | level 2 (the machine) | level 1, inlined | level 1, the handler opaque (`dyn`, a call each) |
+|---|---|---|---|---|
+| `answered` | 5.58 | 10.8 | 2.45 (a `black_box` each step) | — |
+| `reads` | 3.15 | 10.2 | 0.017 (folded by LLVM) | 0.70 |
+| `writer` | 9.45 | 11.5 | 0.85 | — |
+| `state` / `stateDeep` | 12.47 / 12.02 | 42.9 / 43.1 | 0.017 (folded) | 1.21 (2000 calls) |
+
+Inlined, LLVM sees the loop through the handler and folds it: the effect costs nothing. Behind `dyn`, each operation a
+real call, still 10× faster than the JVM and 35× than the machine. Open: the bridge — a level-1 program calling an
+effect of level 2 (it cannot capture `k` itself), and an `effect!` macro writing an effect's trait, its audited and
+observed wrappers.
+
 ## Speed
 
 okay-core's kernel lanes (`KernelBenchmark`), the same programs and n, ported to `benches/kernel.rs`; one machine (an
