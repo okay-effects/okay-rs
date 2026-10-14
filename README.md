@@ -195,18 +195,19 @@ JMH's lock). µs per run of the program:
 
 | lane | Scala (okay-core, JVM 26) | Rust, first port | Rust, now | now / Scala |
 |---|---|---|---|---|
-| `pure` — isEven/isOdd, 1000 binds | 3.08 | 19.95 | 7.1–9.7 | 2.3–3.1× |
-| `answered` — an operation answered in place, each step | 5.58 | 37.69 | 10.1 | 1.8× |
-| `forwarded` / `forwarded16` — past 1 / 16 handlers | 5.53 / 5.83 | 36.89 / 48.18 | 10.2 / 12.3 | 1.8× / 2.1× |
-| `general` — a `deep` handler, `k` each step | 9.44 | 82.64 | 42.0 | 4.4× |
-| `forwardedK` / `forwardedK16` | 20.28 / 139.80 | 84.43 / 197.29 | 45.1 / 89.3 | 2.2× / **0.64×** |
-| `reads` / `writer` | 3.15 / 9.45 | 29.61 / 31.59 | 10.1 / 10.8 | 3.2× / 1.1× |
-| `stateCell` / `state` / `stateDeep` | 9.34 / 12.47 / 12.02 | 71.60 / 72.56 / 80.13 | 36.0 / 44.5 / 45.3 | 3.6–3.9× |
-| `leftMaps` / `rightMaps` | 4.92 / 7.75 | 31.77 / 36.55 | 22.7 / 28.6 | 4.6× / 3.7× |
-| `throwing` — an aborting handler in the program, each raise | 20.23 | 139.58 | 97.4 | 4.8× |
-| `choose` — every value of a choice among 1000 | 13.24 | 124.41 | 113.5 | 8.6× |
+| `pure` — isEven/isOdd, 1000 binds | 3.08 | 20.34 | 8.50 | 2.8× |
+| `answered` — an operation answered in place, each step | 5.58 | 37.21 | 10.81 | 1.9× |
+| `forwarded` / `forwarded16` — past 1 / 16 handlers | 5.53 / 5.83 | 37.71 / 47.31 | 11.04 / 12.43 | 2.0× / 2.1× |
+| `general` — a `deep` handler, `k` each step | 9.44 | 85.57 | 36.87 | 3.9× |
+| `forwardedK` / `forwardedK16` | 20.28 / 139.80 | 88.10 / 190.64 | 38.73 / 78.91 | 1.9× / **0.56×** |
+| `reads` / `writer` | 3.15 / 9.45 | 29.16 / 30.61 | 10.14 / 11.66 | 3.2× / 1.2× |
+| `stateCell` / `state` / `stateDeep` | 9.34 / 12.47 / 12.02 | 71.66 / 80.03 / 74.24 | 35.48 / 42.63 / 42.92 | 3.4–3.8× |
+| `leftMaps` / `rightMaps` | 4.92 / 7.75 | 29.57 / 35.91 | 20.12 / 26.41 | 4.1× / 3.4× |
+| `throwing` — an aborting handler in the program, each raise | 20.23 | 141.50 | 88.39 | 4.4× |
+| `choose` — every value of a choice among 1000 | 13.24 | 121.61 | 101.52 | 7.7× |
 
-"Now" is single runs during the work (2026-10-14; an interleaved A/B of every step is under way). What made it so,
+Rust's columns from interleaved A/B runs of the commits (`/tmp/okz/tools/rs-ab.sh`, two rounds, each run under JMH's
+lock), 2026-10-14. What made it so,
 each step measured, the ones that lost reverted:
 
 1. **Small values in place**: a value up to 16 bytes with nothing to drop (`i64`, `bool`, `()`, an operation of
@@ -221,8 +222,12 @@ each step measured, the ones that lost reverted:
    back as they are, nothing copied; copies, frames shared, only when it is resumed again.
 6. **`Handler::aborting`**: a handler dropping the rest (okay-core's `Aborting`; `either()` is one) truncates the
    levels, no `k` made.
+7. **A pool of level vectors**: the vector of a rest resumed once goes back to a pool for the next rest taken —
+   `choose` −11%, `general` −12%, `forwardedK` −14% (`answered`, `forwarded`, `writer` +7–8%: the loop's code laid out
+   otherwise by LLVM; the better of three layouts tried).
 
-Tried and not kept: the frames of a bind as a list in the node (every lane but `leftMaps` 30–55% slower: a bigger node
+Tried and not kept: the operation's two paths (in place, taking the rest) as one function, or the taking one out of
+the loop — the captures faster still, the in-place lanes 10–17% slower; the frames of a bind as a list in the node (every lane but `leftMaps` 30–55% slower: a bigger node
 moved each step); frames cloned with `k` (a choice among 1000 cloned its `Vec` at each resumption, 2× slower).
 
 What is left: `malloc` itself — macOS's allocator is where the time goes now (with mimalloc as the global allocator
