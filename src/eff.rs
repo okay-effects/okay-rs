@@ -42,39 +42,43 @@ pub(crate) enum Kind {
 /// same, made where its type was known
 pub(crate) struct Op {
     pub(crate) effect: TypeId,
-    pub(crate) name: &'static str,
+    pub(crate) info: &'static OpInfo,
     pub(crate) value: Val,
-    describe: fn(&Val) -> String,
-    copy: fn(&Val) -> Val,
+}
+
+/// WHAT AN OBSERVER NEEDS OF AN OPERATION, the same for each of an effect and its value's type: one table, made at
+/// compile time — the node holds a reference, not the six
+pub(crate) struct OpInfo {
+    pub(crate) name: fn() -> &'static str,
+    pub(crate) describe: fn(&Val) -> String,
+    pub(crate) copy: fn(&Val) -> Val,
     pub(crate) describe_answer: fn(&Val) -> String,
     pub(crate) copy_answer: fn(&Val) -> Val,
 }
 
+/// the table of an effect `E` and its operation's value `T`
+struct Info<E, T>(PhantomData<fn() -> (E, T)>);
+
+impl<E: Effect, T: Clone + Debug + 'static> Info<E, T> {
+    const INFO: OpInfo = OpInfo {
+        name: std::any::type_name::<E>,
+        describe: describe_as::<E>,
+        copy: copy_as::<E>,
+        describe_answer: describe_as::<T>,
+        copy_answer: copy_as::<T>,
+    };
+}
+
 impl Op {
+    #[inline(always)]
     fn of<E: Effect, T: Clone + Debug + 'static>(e: E) -> Op {
-        Op {
-            effect: TypeId::of::<E>(),
-            name: std::any::type_name::<E>(),
-            value: Val::new(e),
-            describe: describe_as::<E>,
-            copy: copy_as::<E>,
-            describe_answer: describe_as::<T>,
-            copy_answer: copy_as::<T>,
-        }
+        Op { effect: TypeId::of::<E>(), info: &Info::<E, T>::INFO, value: Val::new(e) }
     }
 }
 
 impl Clone for Op {
     fn clone(&self) -> Self {
-        Op {
-            effect: self.effect,
-            name: self.name,
-            value: (self.copy)(&self.value),
-            describe: self.describe,
-            copy: self.copy,
-            describe_answer: self.describe_answer,
-            copy_answer: self.copy_answer,
-        }
+        Op { effect: self.effect, info: self.info, value: (self.info.copy)(&self.value) }
     }
 }
 
@@ -309,12 +313,12 @@ pub struct AnyOp(pub(crate) Op);
 impl AnyOp {
     /// its effect, the type's name without its path: `Reader<i64>`
     pub fn effect(&self) -> String {
-        short(self.0.name)
+        short((self.0.info.name)())
     }
 
     /// the operation as written: `Put(6, _)`
     pub fn describe(&self) -> String {
-        (self.0.describe)(&self.0.value)
+        (self.0.info.describe)(&self.0.value)
     }
 
     /// passed on, to the handler further out: its answer to the rest `k`
@@ -332,8 +336,8 @@ impl AnyOp {
         after: impl Fn(String) -> Eff<T, ()> + 'static,
     ) -> Eff<T, B> {
         let k0 = k.k.clone();
-        let describe = self.0.describe_answer;
-        let copy = self.0.copy_answer;
+        let describe = self.0.info.describe_answer;
+        let copy = self.0.info.copy_answer;
         let frame: Frame = Rc::new(move |v: Val| {
             let told = after(describe(&v)).node;
             let k0 = k0.clone();
