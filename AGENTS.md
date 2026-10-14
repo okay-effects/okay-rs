@@ -34,7 +34,10 @@
   (`Cx(h, rest)`, `Has<E, Ix>`), a program as data the machine's `eff! { data; … }`. An operation goes through each
   layer of the context (`Has::perform`/`resume`, typed by its value): `Paths` (`all`/`first`) logs the answers from
   further out and replays them (many-shot `k` by replay — the body an `AsyncFn` deciding by its effects only),
-  `Observed` (`observe`) shows each to a `Watch`. `tail_rec` for recursion in constant stack. `effect!` declares an
+  `Observed` (`observe`) shows each to a `Watch`. Interceptors: `Audited::new(handler, interceptor)`, an
+  `Interceptor<E, R, Ix>` passing each operation on (`Pass`), changing or refusing it, its own operations to the
+  context after the handler (`Has<E, Through<Ix>>`); a sensitive effect has no other way into a context (`Allowed`,
+  sealed). `tests/typed_intercept.rs` = `tests/intercept.rs`'s programs and trails: keep the three in step. `tail_rec` for recursion in constant stack. `effect!` declares an
   effect and its operations for both forms. `tests/replay.rs` checks the replay against the machine's values.
 - Benchmarks: `benches/kernel.rs`, okay-core's KernelBenchmark lanes, the same programs and n; run it under JMH's
   lock (`/tmp/okz/tools/withlock.py`) — other sessions measure on this machine — and compile under it too.

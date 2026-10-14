@@ -218,10 +218,9 @@ assert_eq!(run(counted(&cx, 10)), Ok(21));
 ```
 
 The effects are the machine's own enums (`Reader`, `State`, `Writer`, `Throws`); a handler implements `Handles<E>`,
-answering `Step::Now(reply.give(v))` or taking the rest `Step::Later`. A sensitive effect is in a context only as
-`Audited { handler, interceptor }` (sealed: a bare bank's context does not compile). `tests/typed.rs`: one program
-under two contexts, either, a raise in a loop each under its own either, a generator with a state in it, the payments
-audit.
+answering `Step::Now(reply.give(v))` or taking the rest `Step::Later`. A sensitive effect is in a context only
+under an interceptor of it (below). `tests/typed.rs`: one program under two contexts, either, a raise in a loop each
+under its own either, a generator with a state in it.
 
 µs per 1000 operations, the same lanes:
 
@@ -267,10 +266,47 @@ choose programs, a read before the choice, a state in each path, the triples, ei
 - **`tail_rec(s0, async |s| … Loop::Next(s2) / Loop::Done(a))`**: a loop in constant stack — a recursion, a mutual
   one (its calls the states: `Call::Even(n)`, `Call::Odd(n)`), at any depth: a million calls, each a state's
   operation. An async recursion is Rust's own: each call a future boxed in its caller's, polled through them all.
+- **Interceptors**: `Audited::new(handler, interceptor)` in the context — each operation of the effect goes through
+  the `Interceptor<E, R, Ix>`, which passes it on (`pass.perform(…)`, as it is or changed), gives or changes its
+  answer, or refuses it (an answer saying so, or an error raised further out); its own operations — a trail
+  (`record`, `Trail`), a raise — go to the context after the handler. A sensitive effect is handled ONLY so: a bare
+  bank, or a bank under something not an interceptor of `Pay`, is "no handler of `Pay` in the context"; the handler
+  is a private field, not reached past its interceptor (the three `compile_fail` doc tests of `okay::typed`). An
+  interceptor costs nothing: inlined, `answered` through one 0.26 µs per 1000 operations, as without.
+  `tests/typed_intercept.rs` runs `tests/intercept.rs`'s programs, the same trails:
+
+```rust
+impl<R, I1, I2> Interceptor<Pay, R, (I1, I2)> for Guarded
+where R: Has<Throws<String>, I1> + Has<Audit, I2> {
+    fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, cx: &R) -> Step {
+        match op {
+            Pay::Transfer(to, amount, r) => {
+                let to = to.trim().to_uppercase();
+                if amount > self.limit {
+                    let why = format!("refused: {amount} to {} over the limit {}", masked(&to), self.limit);
+                    now(record(cx, why.clone()));
+                    let _: Option<()> = now(raise(cx, why));
+                    return Step::Later;
+                }
+                let account = to.clone();
+                let Some(receipt) = pass.perform(|r2| Pay::Transfer(account, amount, r2)) else { return Step::Later };
+                now(record(cx, format!("transfer {amount} to {} → {receipt}", masked(&to))));
+                Step::Now(r.give(receipt))
+            }
+            …
+        }
+    }
+}
+let cx = Cx(Audited::new(Bank(RefCell::new(1000)), Guarded { limit: 1000 }), Cx(Raised::new(), Cx(Trail::new(), End)));
+let result = run(catch(&cx.1.0, payments(&cx)));
+// "transfer 100 to ****1234 → ok:ACCT-1234:100", "balance → 900", "refused: 5000 to ****T-77 over the limit 1000"
+```
+
 - **`observe(cx, watch, body)`**: every operation of every effect on its way out seen by a `Watch` — its effect
   (`State<i64>`), the operation as written (`Put(6, _)`), its answer — let through or refused (the body dropped
   there: `Err(why)`); a layer with no handler of its own, each effect at the index it has further out. Outside `all`
-  it sees an operation further out once; inside, each time the path runs.
+  it sees an operation further out once; inside, each time the path runs. 11 ns an operation seen (`answered` under
+  a watch counting them: 11.0 µs per 1000).
 - **`effect!`**: the enum, its kind, each operation for both forms — `Pay::transfer(…)` an `Eff`, `transfer(cx, …)`
   a `Perform`:
 

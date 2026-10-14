@@ -92,63 +92,6 @@ fn a_generator_each_value_as_it_comes_the_body_resumed_once() {
     assert_eq!(*seen.borrow(), vec![1, 3, 6, 10, 15]);
 }
 
-// A SENSITIVE EFFECT: payments, under their audit only
-
-okay::effect! {
-    enum Pay: Sensitive {
-        /// money sent to an account: a receipt, or why not
-        Transfer(to: String, amount: i64) -> Result<String, String> = transfer;
-    }
-}
-
-struct Bank(RefCell<i64>);
-
-/// the audit's policy: a limit, the trail
-struct Guard {
-    limit: i64,
-    trail: RefCell<Vec<String>>,
-}
-
-impl Handles<Pay> for Audited<Bank, Guard> {
-    fn handle(&self, op: Pay) -> Step {
-        match op {
-            Pay::Transfer(to, amount, r) => {
-                let to = to.trim().to_uppercase();
-                if amount > self.interceptor.limit {
-                    let why = format!("refused: {amount} over the limit {}", self.interceptor.limit);
-                    self.interceptor.trail.borrow_mut().push(why.clone());
-                    return Step::Now(r.give(Err(why)));
-                }
-                *self.handler.0.borrow_mut() -= amount;
-                let receipt = format!("ok:{to}:{amount}");
-                self.interceptor.trail.borrow_mut().push(format!("transfer {amount} → {receipt}"));
-                Step::Now(r.give(Ok(receipt)))
-            }
-        }
-    }
-}
-
-/// "a sensitive effect under its audit: passed on changed, told, refused over the limit"
-#[test]
-fn a_sensitive_effect_under_its_audit() {
-    let cx = Cx(
-        Audited { handler: Bank(RefCell::new(1000)), interceptor: Guard { limit: 1000, trail: RefCell::new(vec![]) } },
-        End,
-    );
-    let c = &cx; // `eff! { … }` moves what it uses: a reference to the context
-    let r: Result<Result<String, String>, Stuck> = run(eff! {
-        a <- transfer(c, " acct-1 ".into(), 100);
-        b <- transfer(c, "acct-2".into(), 5000);
-        yield a.and(b)
-    });
-    assert_eq!(r, Ok(Err("refused: 5000 over the limit 1000".to_string())));
-    assert_eq!(
-        cx.0.interceptor.trail.borrow().clone(),
-        vec!["transfer 100 → ok:ACCT-1:100".to_string(), "refused: 5000 over the limit 1000".to_string()]
-    );
-    assert_eq!(*cx.0.handler.0.borrow(), 900);
-}
-
 /// "a raise reaches the nearest either: the types find it"
 #[test]
 fn throws_found_by_type() {

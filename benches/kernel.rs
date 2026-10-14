@@ -445,6 +445,33 @@ mod typed {
         sum.into_inner()
     }
 
+    /// an interceptor passing each operation on: `answered` through it
+    pub struct Passing;
+    impl<R> Interceptor<Tick, R, ()> for Passing {
+        #[inline(always)]
+        fn intercept<H: Handles<Tick>>(&self, op: Tick, pass: Pass<'_, H>, _: &R) -> Step {
+            match op {
+                Tick::Value(i, r) => pass.perform(|r2| Tick::Value(i, r2)).map_or(Step::Later, |v| Step::Now(r.give(v))),
+            }
+        }
+    }
+    pub fn intercepted() -> bool { run(is_even(&Cx(Audited::new(Ticking, Passing), End), black_box(N))).unwrap_or(false) }
+
+    /// a watch seeing every operation, its effect named, keeping none: `answered` under it
+    pub struct Counting(std::cell::Cell<u64>);
+    impl Watch for Counting {
+        #[inline]
+        fn after(&self, _: &str, _: &dyn std::fmt::Debug, _: &dyn std::fmt::Debug) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    pub fn observed() -> bool {
+        let cx = Cx(Ticking, End);
+        run(observe(&cx, Counting(std::cell::Cell::new(0)), async |cx| is_even(cx, black_box(N)).await))
+            .map(|r| r.unwrap_or(false))
+            .unwrap_or(false)
+    }
+
     /// every value of a choice among n: n paths, each the body run again, its choice told it
     pub fn choose() -> usize {
         let xs: Vec<i64> = (0..N).collect();
@@ -514,13 +541,15 @@ fn main() {
         ("T:throwing", Box::new(|| typed::throwing() as u64)),
         ("T:generate", Box::new(|| typed::generate_() as u64)),
         ("T:choose", Box::new(|| typed::choose() as u64)),
+        ("T:intercepted", Box::new(|| typed::intercepted() as u64)),
+        ("T:observed", Box::new(|| typed::observed() as u64)),
     ];
     // each lane's answer, the Scala lanes' own
     assert!(answered() && general() && forwarded() && forwarded16() && forwarded_k() && forwarded_k16());
     assert_eq!((reads(), writer(), state_cell(), state(), state_deep()), (N, N as usize, N, N, N));
     assert_eq!((left_maps(), right_maps(), throwing(), throwing_k(), choose()), (N, N, 2 * N, 2 * N, N as usize));
     assert!(direct::answered());
-    assert!(typed::answered());
+    assert!(typed::answered() && typed::intercepted() && typed::observed());
     assert_eq!((typed::reads(), typed::writer(), typed::state(), typed::state_deep(), typed::throwing(), typed::generate_()),
         (N, N as usize, N, N, 2 * N, N * (N - 1) / 2));
     assert_eq!((typed::state_opaque(), typed::reads_opaque(), typed::choose()), (N, N, N as usize));

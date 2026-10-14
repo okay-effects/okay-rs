@@ -3,7 +3,8 @@
 //! runs under: an operation of a handler answering in place is `Ready` at once — inlined, a call of the handler; one
 //! dropping the rest ends the block (`either`); one taking the rest once suspends it — the state machine itself the
 //! `k`, no node on the heap (`generate`); one taking it many times runs it again for each path, its past told it
-//! again (`all`, `first`: replay). A sensitive effect is in a context only under its audit; every operation of every
+//! again (`all`, `first`: replay). An effect's handler under an `Interceptor` (`Audited::new(handler, interceptor)`):
+//! each operation passed on, changed, refused — a sensitive effect is in a context only so; every operation of every
 //! effect seen by a `Watch` under `observe`.
 //!
 //! ```
@@ -31,17 +32,70 @@
 //!
 //! ```compile_fail
 //! use okay::typed::*;
-//! use okay::{Effect, Reply, Sensitive};
-//! #[derive(Clone, Debug)] enum Pay { Transfer(i64, Reply<String>) }
-//! impl Effect for Pay { type Kind = Sensitive; }
+//! okay::effect! { enum Pay: Sensitive { Transfer(n: i64) -> String = transfer; } }
 //! struct Bank;
 //! impl Handles<Pay> for Bank {
 //!     fn handle(&self, op: Pay) -> Step { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
 //! }
 //! let cx = Cx(Bank, End);
-//! let _ = run(perform::<_, Pay, _, String>(&cx, |r| Pay::Transfer(5, r)));
+//! let _ = run(transfer(&cx, 5));
 //! ```
-
+//!
+//! nor one under something not its interceptor:
+//!
+//! ```compile_fail
+//! use okay::typed::*;
+//! okay::effect! { enum Pay: Sensitive { Transfer(n: i64) -> String = transfer; } }
+//! struct Bank;
+//! impl Handles<Pay> for Bank {
+//!     fn handle(&self, op: Pay) -> Step { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
+//! }
+//! struct NotAnInterceptor;
+//! let cx = Cx(Audited::new(Bank, NotAnInterceptor), End);
+//! let _ = run(transfer(&cx, 5));
+//! ```
+//!
+//! and under its interceptor the handler is not reached past it:
+//!
+//! ```compile_fail
+//! use okay::typed::*;
+//! okay::effect! { enum Pay: Sensitive { Transfer(n: i64) -> String = transfer; } }
+//! struct Bank;
+//! impl Handles<Pay> for Bank {
+//!     fn handle(&self, op: Pay) -> Step { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
+//! }
+//! struct Guard;
+//! impl<R> Interceptor<Pay, R, ()> for Guard {
+//!     fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, _: &R) -> Step {
+//!         match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("refused {n}"))) }
+//!     }
+//! }
+//! let cx = Cx(Audited::new(Bank, Guard), End);
+//! let _ = cx.0.handler.handle(Pay::Transfer(5, todo!()));
+//! ```
+//!
+//! The one way:
+//!
+//! ```
+//! use okay::typed::*;
+//! okay::effect! { enum Pay: Sensitive { Transfer(n: i64) -> String = transfer; } }
+//! struct Bank;
+//! impl Handles<Pay> for Bank {
+//!     fn handle(&self, op: Pay) -> Step { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
+//! }
+//! struct Limit(i64);
+//! impl<R> Interceptor<Pay, R, ()> for Limit {
+//!     fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, _: &R) -> Step {
+//!         match op {
+//!             Pay::Transfer(n, r) if n > self.0 => Step::Now(r.give(format!("refused {n}"))),
+//!             Pay::Transfer(n, r) => pass.perform(|r2| Pay::Transfer(n, r2)).map_or(Step::Later, |s| Step::Now(r.give(s))),
+//!         }
+//!     }
+//! }
+//! let cx = Cx(Audited::new(Bank, Limit(100)), End);
+//! assert_eq!(run(transfer(&cx, 5)), Ok("ok 5".to_string()));
+//! assert_eq!(run(transfer(&cx, 500)), Ok("refused 500".to_string()));
+//! ```
 use std::cell::{Cell, RefCell};
 use std::fmt::Debug;
 use std::future::Future;
@@ -50,9 +104,10 @@ use std::pin::{pin, Pin};
 use std::task::{Context, Poll, Waker};
 
 use crate::eff::{short, Answer, Loop, Never, Reply};
+use crate::audit::Audit;
 use crate::effects::{Choose, Reader, State, Throws, Writer};
 use crate::val::Val;
-use crate::row::{Effect, Here, Plain, Sensitive, There};
+use crate::row::{Effect, Here, Plain, There};
 
 // HANDLERS
 
@@ -71,17 +126,30 @@ pub trait Handles<E: Effect> {
     }
 }
 
+/// a handler borrowed: a part of a program run with its own context, the handler shared with the whole
+impl<E: Effect, H: Handles<E>> Handles<E> for &H {
+    #[inline(always)]
+    fn handle(&self, op: E) -> Step {
+        (**self).handle(op)
+    }
+    #[inline(always)]
+    fn resume(&self) -> Option<Answer> {
+        (**self).resume()
+    }
+}
+
 mod sealed {
     /// a type no one outside okay names: what `Allowed`'s method asks
     pub struct Token;
 }
 
-/// A HANDLER ALLOWED FOR AN EFFECT OF THE KIND `K`: any handler for a plain effect; for a sensitive one okay's audit
-/// alone. Sealed: its method asks a type no one outside okay can name
+/// A HANDLER ALLOWED FOR AN EFFECT OF THE KIND `K` in a context by itself: any for a plain effect, none for a sensitive
+/// one — that is handled only under an interceptor (`Audited::new(handler, interceptor)`). Sealed: its method asks a
+/// type no one outside okay can name
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not under an audit: a sensitive effect is handled only through one",
     label = "not an audit",
-    note = "put `Audited {{ handler, interceptor }}` in the context, not the bare handler"
+    note = "put `Audited::new(handler, interceptor)` in the context, not the bare handler"
 )]
 pub trait Allowed<K> {
     #[doc(hidden)]
@@ -92,16 +160,56 @@ impl<H> Allowed<Plain> for H {
     fn allowed(&self, _: sealed::Token) {}
 }
 
-/// A HANDLER UNDER ITS AUDIT: the effect's author implements `Handles<E>` for it, calling the interceptor around the
-/// handler — the only way a sensitive effect is handled
-pub struct Audited<H, I> {
-    pub handler: H,
-    pub interceptor: I,
+// INTERCEPTORS: an effect's operations seen on their way to its handler — passed on as they are or changed, their
+// answers changed, refused
+
+/// AN INTERCEPTOR OF `E` around a handler: each operation on its way to it — passed on (`pass.perform(…)`, as it is
+/// or changed), its answer given or changed (`r.give(…)`), refused (an answer saying so, or an error raised further
+/// out: `Step::Later`, the rest dropped). Its own operations go to `cx`, the context after its handler — a trail, a
+/// `Throws` — found at `Ix`
+pub trait Interceptor<E: Effect, R, Ix> {
+    fn intercept<H: Handles<E>>(&self, op: E, pass: Pass<'_, H>, cx: &R) -> Step;
 }
 
-impl<H, I> Allowed<Sensitive> for Audited<H, I> {
-    fn allowed(&self, _: sealed::Token) {}
+/// the handler an interceptor passes an operation on to — the only way to it
+pub struct Pass<'h, H>(&'h H);
+
+impl<H> Pass<'_, H> {
+    /// the operation `make` given a reply, handled: its value, or none — the handler took the rest
+    pub fn perform<E: Effect, X: 'static>(&self, make: impl FnOnce(Reply<X>) -> E) -> Option<X>
+    where
+        H: Handles<E>,
+    {
+        match self.0.handle(make(Reply::new())) {
+            Step::Now(a) => Some(a.0.take::<X>()),
+            Step::Later => None,
+        }
+    }
 }
+
+/// A HANDLER UNDER ITS INTERCEPTOR: each operation of the effect goes through the interceptor, the handler reached
+/// only by it — the only way a sensitive effect is handled. Its handler not reachable from outside it either
+pub struct Audited<H, I> {
+    handler: H,
+    interceptor: I,
+}
+
+impl<H, I> Audited<H, I> {
+    pub fn new(handler: H, interceptor: I) -> Self {
+        Audited { handler, interceptor }
+    }
+    /// the interceptor, its state seen
+    pub fn interceptor(&self) -> &I {
+        &self.interceptor
+    }
+    /// the two, the run over
+    pub fn into_parts(self) -> (H, I) {
+        (self.handler, self.interceptor)
+    }
+}
+
+/// the index of an effect handled under an interceptor: the interceptor's own (`Ix`, where its operations go)
+pub struct Through<Ix>(PhantomData<Ix>);
 
 // THE CONTEXT: the handlers in force, a list — `Cx(h, rest)`, `End`
 
@@ -112,7 +220,7 @@ pub struct End;
 /// — on the way through each layer between (a replay, an observer)
 #[diagnostic::on_unimplemented(
     message = "no handler of `{E}` in the context `{Self}`",
-    note = "put a handler of `{E}` in the context; a sensitive effect's only under its audit: `Audited {{ handler, interceptor }}`"
+    note = "put a handler of `{E}` in the context; a sensitive effect's only under an interceptor of it: `Audited::new(handler, interceptor)`"
 )]
 pub trait Has<E: Effect, Ix> {
     /// the operation's value now, or none: taken, the program suspended
@@ -154,6 +262,20 @@ impl<E: Effect, Ix, C: Has<E, Ix>> Has<E, Ix> for &C {
     #[inline(always)]
     fn resume<T: Clone + Debug + 'static>(&self) -> Option<T> {
         (**self).resume()
+    }
+}
+
+impl<E: Effect, H: Handles<E>, I: Interceptor<E, R, Ix>, R, Ix> Has<E, Through<Ix>> for Cx<Audited<H, I>, R> {
+    #[inline]
+    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Option<T> {
+        match self.0.interceptor.intercept(op, Pass(&self.0.handler), &self.1) {
+            Step::Now(a) => Some(a.0.take::<T>()),
+            Step::Later => None,
+        }
+    }
+    /// the rest taken by an interceptor (an error raised further out) is not given back
+    fn resume<T: Clone + Debug + 'static>(&self) -> Option<T> {
+        None
     }
 }
 
@@ -294,8 +416,32 @@ impl<W: Clone + std::fmt::Debug + 'static> Handles<Writer<W>> for Collect<W> {
 
 // DROPPING THE REST: either — the body's value, or the error raised in it, the body dropped there
 
-/// the handler of `Throws<E>` that `either` puts in the context: the error kept, the rest taken (never given back)
+/// the handler of `Throws<E>` that `either` puts in the context: the error kept, the rest taken (never given back). In
+/// a context itself (`Raised::new()`), past an interceptor raising, with `catch`
 pub struct Raised<E>(RefCell<Option<E>>);
+impl<E> Raised<E> {
+    pub fn new() -> Self {
+        Raised(RefCell::new(None))
+    }
+}
+impl<E> Default for Raised<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// a program run under the `Raised` of its context: its value, or the error raised — the program dropped there
+pub async fn catch<E, A>(raised: &Raised<E>, program: impl Future<Output = A>) -> Result<A, E> {
+    let mut fut = pin!(program);
+    std::future::poll_fn(|c| match fut.as_mut().poll(c) {
+        Poll::Ready(a) => Poll::Ready(Ok(a)),
+        Poll::Pending => match raised.0.borrow_mut().take() {
+            Some(e) => Poll::Ready(Err(e)),
+            None => Poll::Pending,
+        },
+    })
+    .await
+}
 impl<E: Clone + std::fmt::Debug + 'static> Handles<Throws<E>> for Raised<E> {
     #[inline(always)]
     fn handle(&self, op: Throws<E>) -> Step {
@@ -313,7 +459,7 @@ pub async fn either<'c, E, A, C>(cx: &'c C, body: impl AsyncFnOnce(&Cx<Raised<E>
 where
     E: Clone + std::fmt::Debug + 'static,
 {
-    let inner = Cx(Raised(RefCell::new(None)), cx);
+    let inner = Cx(Raised::new(), cx);
     let mut fut = pin!(body(&inner));
     std::future::poll_fn(|c| match fut.as_mut().poll(c) {
         Poll::Ready(a) => Poll::Ready(Ok(a)),
@@ -597,6 +743,18 @@ impl<W: Watch> Watch for &W {
     }
 }
 
+/// an effect's type name, its paths dropped: a slice of it when its arguments have none (`Pay`, `Reader<i64>`), else
+/// made (`Writer<String>` of `okay::effects::Writer<alloc::string::String>`)
+#[inline]
+fn effect_name(full: &'static str) -> std::borrow::Cow<'static, str> {
+    let generic = full.find('<').unwrap_or(full.len());
+    if full[generic..].contains("::") {
+        return std::borrow::Cow::Owned(short(full));
+    }
+    let start = full[..generic].rfind("::").map_or(0, |i| i + 2);
+    std::borrow::Cow::Borrowed(&full[start..])
+}
+
 /// the layer `observe` puts in the context: no handler of its own, each effect at the index it has further out
 pub struct Observed<'c, W, C> {
     watch: W,
@@ -607,7 +765,7 @@ pub struct Observed<'c, W, C> {
 
 impl<E: Effect, Ix, W: Watch, C: Has<E, Ix>> Has<E, Ix> for Observed<'_, W, C> {
     fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Option<T> {
-        let effect = short(std::any::type_name::<E>());
+        let effect = effect_name(std::any::type_name::<E>());
         if let Err(why) = self.watch.before(&effect, &op) {
             *self.refused.borrow_mut() = Some(why);
             return None;
@@ -619,7 +777,7 @@ impl<E: Effect, Ix, W: Watch, C: Has<E, Ix>> Has<E, Ix> for Observed<'_, W, C> {
                 Some(t)
             }
             None => {
-                *self.waiting.borrow_mut() = Some((effect, Box::new(seen)));
+                *self.waiting.borrow_mut() = Some((effect.into_owned(), Box::new(seen)));
                 None
             }
         }
@@ -652,11 +810,55 @@ pub async fn observe<'c, W: Watch, A, C>(
     .await
 }
 
+// THE TRAIL: `Audit`'s records kept, in order — what interceptors and watches write
+
+/// a line of the trail
+#[inline(always)]
+pub fn record<C: Has<Audit, I>, I>(cx: &C, line: String) -> Perform<'_, C, Audit, I, ()> {
+    perform(cx, |r| Audit::Record(line, r))
+}
+
+/// the lines recorded, in order
+pub struct Trail(RefCell<Vec<String>>);
+impl Trail {
+    pub fn new() -> Self {
+        Trail(RefCell::new(Vec::new()))
+    }
+    /// a line, kept straight — by a watch
+    pub fn push(&self, line: String) {
+        self.0.borrow_mut().push(line);
+    }
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut self.0.borrow_mut())
+    }
+}
+impl Default for Trail {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl Handles<Audit> for Trail {
+    #[inline]
+    fn handle(&self, op: Audit) -> Step {
+        match op {
+            Audit::Record(line, r) => {
+                self.0.borrow_mut().push(line);
+                Step::Now(r.give(()))
+            }
+        }
+    }
+}
+
 // RUNNING
 
 /// why a run did not end: an operation taken by a handler that never gives it back, with none outside to drop it
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stuck;
+
+/// an operation (a program) done now, where no `.await` is — in an interceptor: its value, or none — taken
+pub fn now<F: Future>(fut: F) -> Option<F::Output> {
+    run(fut).ok()
+}
 
 /// a program run to its value — every handler of its context in force
 pub fn run<F: Future>(fut: F) -> Result<F::Output, Stuck> {
