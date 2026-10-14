@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::eff::{Answer, AnyOp, Eff, Node, Op, Pass, Val};
-use crate::machine::{AnsweringRt, DeepRt, K0, Level, ObserveRt, StatefulRt};
+use crate::machine::{AbortingRt, AnsweringRt, DeepRt, K0, Level, ObserveRt, StatefulRt};
 use crate::row::Effect;
 
 /// the types of a handler, the compiler's only
@@ -62,6 +62,16 @@ impl<E: Effect, T, A: 'static, B: 'static> Handler<E, T, A, B> {
             }),
         };
         Handler { level: Level::Stateful(TypeId::of::<E>(), Rc::new(rt), Rc::new(s0)), _t: PhantomData }
+    }
+
+    /// DROPPING THE REST: each operation's program in place of the body's — the rest never taken, no `k` made (an
+    /// error, an early answer); `ret` of the body's value
+    pub fn aborting(ret: impl Fn(A) -> Eff<T, B> + 'static, abort: impl Fn(E) -> Eff<T, B> + 'static) -> Self {
+        let rt = AbortingRt {
+            ret: Box::new(move |v: Val| ret(v.take::<A>()).node),
+            abort: Box::new(move |op: Val| abort(op.take::<E>()).node),
+        };
+        Handler { level: Level::Aborting(TypeId::of::<E>(), Rc::new(rt)), _t: PhantomData }
     }
 
     /// TAKING THE REST: each operation its clause, given the rest `k` — resumed none, once or many times, by the

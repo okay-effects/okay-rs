@@ -156,7 +156,7 @@ pub fn raise<E: Clone + Debug + 'static, A: 'static, R: Member<Throws<E>, Ix>, I
 
 /// the value, or the error raised
 pub fn either<E: Clone + Debug + 'static, T, A: 'static>() -> Handler<Throws<E>, T, A, Result<A, E>> {
-    Handler::deep(|a| pure(Ok(a)), |op, _k| match op {
+    Handler::aborting(|a| pure(Ok(a)), |op| match op {
         Throws::Raise(e, _) => pure(Err(e)),
     })
 }

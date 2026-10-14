@@ -5,6 +5,7 @@
 //! to any depth, in a stack of the heap.
 
 use std::any::{Any, TypeId};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::eff::{Frame, Kind, Node, Op, Val};
@@ -27,6 +28,12 @@ pub(crate) struct DeepRt {
     pub(crate) apply: Box<dyn Fn(Val, K0) -> Node>,
 }
 
+/// a handler dropping the rest: its program in place of the body's, no `k` made
+pub(crate) struct AbortingRt {
+    pub(crate) ret: Box<dyn Fn(Val) -> Node>,
+    pub(crate) abort: Box<dyn Fn(Val) -> Node>,
+}
+
 pub(crate) struct ObserveRt {
     pub(crate) ret: Box<dyn Fn(Val) -> Node>,
     pub(crate) apply: Box<dyn Fn(Op, K0) -> Node>,
@@ -39,6 +46,7 @@ pub(crate) enum Level {
     Answering(TypeId, Rc<AnsweringRt>),
     Stateful(TypeId, Rc<StatefulRt>, Rc<dyn Any>),
     Deep(TypeId, Rc<DeepRt>),
+    Aborting(TypeId, Rc<AbortingRt>),
     /// an observer: every operation on its way out stops here first
     Observe(Rc<ObserveRt>),
 }
@@ -48,7 +56,7 @@ impl Level {
     fn catches(&self, e: TypeId) -> bool {
         match self {
             Level::Top => false,
-            Level::Answering(f, _) | Level::Stateful(f, _, _) | Level::Deep(f, _) => *f == e,
+            Level::Answering(f, _) | Level::Stateful(f, _, _) | Level::Deep(f, _) | Level::Aborting(f, _) => *f == e,
             Level::Observe(_) => true,
         }
     }
@@ -60,27 +68,33 @@ pub(crate) struct Segment {
     frames: Vec<Frame>,
 }
 
-/// a rest taken: the levels from a handler's up, outermost first, their frames shared — resumed by copies of
-/// their `Rc`s
+/// a rest taken: the levels from a handler's up, outermost first. Resumed by the last holder of it, its levels are
+/// moved back as they are — nothing copied (a handler resuming once: most); else copies of them, their frames made
+/// shared the first time (a closure moved behind an `Rc`, once), each state as it was
 #[derive(Clone)]
-pub(crate) struct K0(Rc<Vec<Segment>>);
+pub(crate) struct K0(Rc<RefCell<Vec<Segment>>>);
 
 impl K0 {
-    /// the levels from `i` up taken off `stack`: their frames made shared where they are, once
+    /// the levels from `i` up taken off `stack`
     fn take(stack: &mut Vec<Segment>, i: usize) -> K0 {
-        let mut taken = stack.split_off(i);
-        for s in taken.iter_mut() {
-            s.frames.iter_mut().for_each(Frame::make_shared);
-        }
-        K0(Rc::new(taken))
+        K0(Rc::new(RefCell::new(stack.split_off(i))))
     }
 
-    /// the levels put back on `stack`, copies: each frame's `Rc`, each state as it was
-    fn put(&self, stack: &mut Vec<Segment>) {
-        stack.extend(self.0.iter().map(|t| Segment {
-            level: t.level.clone(),
-            frames: t.frames.iter().map(Frame::copy_shared).collect(),
-        }));
+    /// the levels put back on `stack`
+    fn put(self, stack: &mut Vec<Segment>) {
+        match Rc::try_unwrap(self.0) {
+            Ok(levels) => stack.extend(levels.into_inner()),
+            Err(shared) => {
+                let mut levels = shared.borrow_mut();
+                for s in levels.iter_mut() {
+                    s.frames.iter_mut().for_each(Frame::make_shared);
+                }
+                stack.extend(levels.iter().map(|t| Segment {
+                    level: t.level.clone(),
+                    frames: t.frames.iter().map(Frame::copy_shared).collect(),
+                }));
+            }
+        }
     }
 }
 
@@ -102,6 +116,7 @@ pub(crate) fn run(node: Node) -> Val {
                         Some(Level::Answering(_, rt)) => Kind::Return((rt.ret)(v)),
                         Some(Level::Stateful(_, rt, s)) => Kind::Return((rt.ret)(s, v)),
                         Some(Level::Deep(_, rt)) => (rt.ret)(v).0,
+                        Some(Level::Aborting(_, rt)) => (rt.ret)(v).0,
                         Some(Level::Observe(rt)) => (rt.ret)(v).0,
                     },
                 }
@@ -155,6 +170,12 @@ pub(crate) fn run(node: Node) -> Val {
                         let rt = rt.clone();
                         let k = K0::take(&mut stack, i);
                         (rt.apply)(op.value, k).0
+                    }
+                    // dropping the rest: the levels from it up dropped, no `k` made; its program outside it
+                    Level::Aborting(_, rt) => {
+                        let rt = rt.clone();
+                        stack.truncate(i);
+                        (rt.abort)(op.value).0
                     }
                     // an observer: the rest taken as a handler's, its clause run outside it with the whole operation
                     Level::Observe(rt) => {

@@ -3,8 +3,7 @@
 //! warm-up, then rounds of a second each, µs per run of the program. No dependencies: `std::hint::black_box`.
 //!
 //! Where a lane cannot be the same: an effect is once in a row here, so `forwarded16`'s sixteen handlers between an
-//! operation and its handler are sixteen effects `Skip<0>`…`Skip<15>`; no `Aborting` form here, so `throwing` is a
-//! `deep` handler not resuming `k` (= `throwingK`).
+//! operation and its handler are sixteen effects `Skip<0>`…`Skip<15>`.
 #![allow(clippy::type_complexity)]
 
 use std::cell::{Cell, RefCell};
@@ -215,20 +214,26 @@ fn right_maps() -> i64 { right_mapping(N).run() }
 
 type Th = row![Throws];
 fn catching() -> Handler<Throws, Nil, i64, Result<i64, String>> {
+    Handler::aborting(|a| pure(Ok(a)), |op| match op { Throws::Raise(e, _) => pure(Err(e)) })
+}
+/// the same, a handler dropping `k` by hand
+fn catching_k() -> Handler<Throws, Nil, i64, Result<i64, String>> {
     Handler::deep(|a| pure(Ok(a)), |op, _k| match op { Throws::Raise(e, _) => pure(Err(e)) })
 }
-fn raising(i: i64, acc: i64) -> Eff<Nil, i64> {
+fn raising(i: i64, acc: i64) -> Eff<Nil, i64> { raising_by(catching, i, acc) }
+fn raising_by(h: fn() -> Handler<Throws, Nil, i64, Result<i64, String>>, i: i64, acc: i64) -> Eff<Nil, i64> {
     if i == 0 {
         pure(acc)
     } else {
         perform::<Th, Throws, _, Never>(|r| Throws::Raise("no".to_string(), r))
             .map(|n: Never| match n {})
             .map(|_: i64| 0i64)
-            .handle(catching())
-            .flat_map(move |e: Result<i64, String>| raising(i - 1, acc + e.unwrap_or_else(|s| s.len() as i64)))
+            .handle(h())
+            .flat_map(move |e: Result<i64, String>| raising_by(h, i - 1, acc + e.unwrap_or_else(|s| s.len() as i64)))
     }
 }
 fn throwing() -> i64 { raising(N, 0).run() }
+fn throwing_k() -> i64 { raising_by(catching_k, N, 0).run() }
 
 // choose: every value of a choice among n
 
@@ -280,12 +285,13 @@ fn main() {
         ("leftMaps", Box::new(|| left_maps() as u64)),
         ("rightMaps", Box::new(|| right_maps() as u64)),
         ("throwing", Box::new(|| throwing() as u64)),
+        ("throwingK", Box::new(|| throwing_k() as u64)),
         ("choose", Box::new(|| choose() as u64)),
     ];
     // each lane's answer, the Scala lanes' own
     assert!(answered() && general() && forwarded() && forwarded16() && forwarded_k() && forwarded_k16());
     assert_eq!((reads(), writer(), state_cell(), state(), state_deep()), (N, N as usize, N, N, N));
-    assert_eq!((left_maps(), right_maps(), throwing(), choose()), (N, N, 2 * N, N as usize));
+    assert_eq!((left_maps(), right_maps(), throwing(), throwing_k(), choose()), (N, N, 2 * N, 2 * N, N as usize));
     for (name, f) in &lanes {
         if only.is_empty() || only.iter().any(|o| o == name) {
             lane(name, f.as_ref());
