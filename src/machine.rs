@@ -10,12 +10,12 @@ use std::rc::Rc;
 use crate::eff::{Frame, Kind, Node, Op, Val};
 
 pub(crate) struct AnsweringRt {
-    pub(crate) value: Box<dyn Fn(Box<dyn Any>) -> Val>,
+    pub(crate) value: Box<dyn Fn(Val) -> Val>,
     pub(crate) ret: Box<dyn Fn(Val) -> Val>,
 }
 
 /// a state's step: the state and the operation to the state moved and the value
-pub(crate) type Step = Box<dyn Fn(Rc<dyn Any>, Box<dyn Any>) -> (Rc<dyn Any>, Val)>;
+pub(crate) type Step = Box<dyn Fn(Rc<dyn Any>, Val) -> (Rc<dyn Any>, Val)>;
 
 pub(crate) struct StatefulRt {
     pub(crate) step: Step,
@@ -24,7 +24,7 @@ pub(crate) struct StatefulRt {
 
 pub(crate) struct DeepRt {
     pub(crate) ret: Box<dyn Fn(Val) -> Node>,
-    pub(crate) apply: Box<dyn Fn(Box<dyn Any>, K0) -> Node>,
+    pub(crate) apply: Box<dyn Fn(Val, K0) -> Node>,
 }
 
 pub(crate) struct ObserveRt {
@@ -92,6 +92,28 @@ pub(crate) fn run(node: Node) -> Val {
                     top.frames.push(f);
                 }
                 m.0
+            }
+            Kind::Then(v, f) => f(v).0,
+            Kind::Inject(op, f) => {
+                let Some(i) = stack.iter().rposition(|s| s.level.catches(op.effect)) else {
+                    panic!("okay: an operation with no handler — a row not checked")
+                };
+                match &mut stack[i].level {
+                    // answered in place: the value straight into the rest, no frame pushed
+                    Level::Answering(_, rt) => f((rt.value)(op.value)).0,
+                    Level::Stateful(_, rt, s) => {
+                        let (s2, v) = (rt.step)(std::mem::replace(s, hole.clone()), op.value);
+                        *s = s2;
+                        f(v).0
+                    }
+                    // the rest taken: its frame first on the top, into `k`
+                    _ => {
+                        if let Some(top) = stack.last_mut() {
+                            top.frames.push(f);
+                        }
+                        Kind::Perform(op)
+                    }
+                }
             }
             Kind::Handle(body, level) => {
                 stack.push(Segment { level, frames: Vec::new() });

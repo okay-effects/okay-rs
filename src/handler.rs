@@ -6,7 +6,7 @@ use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::eff::{take, Answer, AnyOp, Eff, Node, Op, Pass, Val};
+use crate::eff::{Answer, AnyOp, Eff, Node, Op, Pass, Val};
 use crate::machine::{AnsweringRt, DeepRt, K0, Level, ObserveRt, StatefulRt};
 use crate::row::Effect;
 
@@ -36,8 +36,8 @@ impl<E: Effect, T, A: 'static, B: 'static> Handler<E, T, A, B> {
     /// ANSWERING IN PLACE: each operation its value at once, the rest never taken; `ret` of the body's value
     pub fn answering(value: impl Fn(E) -> Answer + 'static, ret: impl Fn(A) -> B + 'static) -> Self {
         let rt = AnsweringRt {
-            value: Box::new(move |op: Box<dyn Any>| value(take_op::<E>(op)).0),
-            ret: Box::new(move |v: Val| Box::new(ret(take::<A>(v))) as Val),
+            value: Box::new(move |op: Val| value(op.take::<E>()).0),
+            ret: Box::new(move |v: Val| Val::new(ret(v.take::<A>()))),
         };
         Handler { level: Level::Answering(TypeId::of::<E>(), Rc::new(rt)), _t: PhantomData }
     }
@@ -50,15 +50,15 @@ impl<E: Effect, T, A: 'static, B: 'static> Handler<E, T, A, B> {
         ret: impl Fn(S, A) -> B + 'static,
     ) -> Self {
         let rt = StatefulRt {
-            step: Box::new(move |s: Rc<dyn Any>, op: Box<dyn Any>| {
+            step: Box::new(move |s: Rc<dyn Any>, op: Val| {
                 let mut s = state::<S>(s);
                 // the state written in place when no rest holds it, copied when one does
-                let Answer(v) = step(Rc::make_mut(&mut s), take_op::<E>(op));
+                let Answer(v) = step(Rc::make_mut(&mut s), op.take::<E>());
                 (s as Rc<dyn Any>, v)
             }),
             ret: Box::new(move |s: Rc<dyn Any>, v: Val| {
                 let s = Rc::try_unwrap(state::<S>(s)).unwrap_or_else(|s| (*s).clone());
-                Box::new(ret(s, take::<A>(v))) as Val
+                Val::new(ret(s, v.take::<A>()))
             }),
         };
         Handler { level: Level::Stateful(TypeId::of::<E>(), Rc::new(rt), Rc::new(s0)), _t: PhantomData }
@@ -71,9 +71,9 @@ impl<E: Effect, T, A: 'static, B: 'static> Handler<E, T, A, B> {
         apply: impl Fn(E, K<T, B>) -> Eff<T, B> + 'static,
     ) -> Self {
         let rt = DeepRt {
-            ret: Box::new(move |v: Val| ret(take::<A>(v)).node),
-            apply: Box::new(move |op: Box<dyn Any>, k: K0| -> Node {
-                apply(take_op::<E>(op), K { k, _t: PhantomData }).node
+            ret: Box::new(move |v: Val| ret(v.take::<A>()).node),
+            apply: Box::new(move |op: Val, k: K0| -> Node {
+                apply(op.take::<E>(), K { k, _t: PhantomData }).node
             }),
         };
         Handler { level: Level::Deep(TypeId::of::<E>(), Rc::new(rt)), _t: PhantomData }
@@ -93,9 +93,9 @@ impl<S: Effect, T, A: 'static, B: 'static> Interceptor<S, T, A, B> {
         apply: impl Fn(S, K<T, B>, Pass<S>) -> Eff<T, B> + 'static,
     ) -> Self {
         let rt = DeepRt {
-            ret: Box::new(move |v: Val| ret(take::<A>(v)).node),
-            apply: Box::new(move |op: Box<dyn Any>, k: K0| -> Node {
-                apply(take_op::<S>(op), K { k, _t: PhantomData }, Pass::new()).node
+            ret: Box::new(move |v: Val| ret(v.take::<A>()).node),
+            apply: Box::new(move |op: Val, k: K0| -> Node {
+                apply(op.take::<S>(), K { k, _t: PhantomData }, Pass::new()).node
             }),
         };
         Interceptor { level: Level::Deep(TypeId::of::<S>(), Rc::new(rt)), _t: PhantomData }
@@ -115,18 +115,10 @@ impl<T, A: 'static, B: 'static> Observer<T, A, B> {
         apply: impl Fn(AnyOp, K<T, B>) -> Eff<T, B> + 'static,
     ) -> Self {
         let rt = ObserveRt {
-            ret: Box::new(move |v: Val| ret(take::<A>(v)).node),
+            ret: Box::new(move |v: Val| ret(v.take::<A>()).node),
             apply: Box::new(move |op: Op, k: K0| -> Node { apply(AnyOp(op), K { k, _t: PhantomData }).node }),
         };
         Observer { level: Level::Observe(Rc::new(rt)), _t: PhantomData }
-    }
-}
-
-/// an operation taken back as its effect: found by its effect's type id, it is one
-fn take_op<E: 'static>(op: Box<dyn Any>) -> E {
-    match op.downcast::<E>() {
-        Ok(e) => *e,
-        Err(_) => panic!("okay: an operation given to a handler of another effect"),
     }
 }
 

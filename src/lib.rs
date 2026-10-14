@@ -40,6 +40,7 @@ mod eff;
 mod handler;
 mod machine;
 mod row;
+mod val;
 
 pub mod audit;
 

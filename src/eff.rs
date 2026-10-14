@@ -2,7 +2,7 @@
 //! runs. The types only the compiler's: the nodes hold values erased (`Box<dyn Any>`), each taken back at the type it
 //! was made at, which the typed API makes the only one possible.
 
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 use std::fmt::{self, Debug};
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -10,8 +10,7 @@ use std::rc::Rc;
 use crate::handler::{Handler, Interceptor, Observer};
 use crate::row::{AuditAll, Audited, Effect, Mark, Member, Nil, PlainKind, Sensitive};
 
-/// a value on its way, erased
-pub(crate) type Val = Box<dyn Any>;
+pub(crate) use crate::val::Val;
 /// a frame: the rest of a bind, given the value — `Fn`, not `FnOnce`: a `k` is resumed as many times as its handler
 /// wants
 pub(crate) type Frame = Rc<dyn Fn(Val) -> Node>;
@@ -25,6 +24,10 @@ pub(crate) enum Kind {
     Return(Val),
     /// a program, then the rest given its value
     Bind(Box<Node>, Frame),
+    /// a value, then the rest given it: `pure(a).flat_map(f)`, no node for the value
+    Then(Val, Frame),
+    /// an operation, then the rest given its value: `perform(op).flat_map(f)` — answered in place, straight into `f`
+    Inject(Op, Frame),
     /// an operation: its handler the nearest of its effect — or an observer before it
     Perform(Op),
     /// a handler entered: its level, the body under it
@@ -40,11 +43,11 @@ pub(crate) enum Kind {
 pub(crate) struct Op {
     pub(crate) effect: TypeId,
     pub(crate) name: &'static str,
-    pub(crate) value: Box<dyn Any>,
-    describe: fn(&dyn Any) -> String,
-    copy: fn(&dyn Any) -> Box<dyn Any>,
-    pub(crate) describe_answer: fn(&dyn Any) -> String,
-    pub(crate) copy_answer: fn(&dyn Any) -> Val,
+    pub(crate) value: Val,
+    describe: fn(&Val) -> String,
+    copy: fn(&Val) -> Val,
+    pub(crate) describe_answer: fn(&Val) -> String,
+    pub(crate) copy_answer: fn(&Val) -> Val,
 }
 
 impl Op {
@@ -52,7 +55,7 @@ impl Op {
         Op {
             effect: TypeId::of::<E>(),
             name: std::any::type_name::<E>(),
-            value: Box::new(e),
+            value: Val::new(e),
             describe: describe_as::<E>,
             copy: copy_as::<E>,
             describe_answer: describe_as::<T>,
@@ -66,7 +69,7 @@ impl Clone for Op {
         Op {
             effect: self.effect,
             name: self.name,
-            value: (self.copy)(&*self.value),
+            value: (self.copy)(&self.value),
             describe: self.describe,
             copy: self.copy,
             describe_answer: self.describe_answer,
@@ -75,16 +78,16 @@ impl Clone for Op {
     }
 }
 
-fn describe_as<T: Debug + 'static>(v: &dyn Any) -> String {
-    match v.downcast_ref::<T>() {
+fn describe_as<T: Debug + 'static>(v: &Val) -> String {
+    match v.peek::<T>() {
         Some(t) => format!("{t:?}"),
         None => String::from("?"),
     }
 }
 
-fn copy_as<T: Clone + 'static>(v: &dyn Any) -> Box<dyn Any> {
-    match v.downcast_ref::<T>() {
-        Some(t) => Box::new(t.clone()),
+fn copy_as<T: Clone + 'static>(v: &Val) -> Val {
+    match v.peek::<T>() {
+        Some(t) => Val::new(t.clone()),
         None => panic!("okay: a value copied at another type than it was made at"),
     }
 }
@@ -130,9 +133,19 @@ impl<R, A, B> Bind<Eff<R, B>> for Eff<R, A> {
     type Out = Eff<R, B>;
 }
 
+/// a program, then `frame`: a value or an operation fused with it, no node made for them
+#[inline(always)]
+fn bound(k: Kind, frame: Frame) -> Kind {
+    match k {
+        Kind::Return(v) => Kind::Then(v, frame),
+        Kind::Perform(op) => Kind::Inject(op, frame),
+        k => Kind::Bind(Box::new(Node(k)), frame),
+    }
+}
+
 /// `a`, over any row
 pub fn pure<R, A: 'static>(a: A) -> Eff<R, A> {
-    Eff::of(Kind::Return(Box::new(a)))
+    Eff::of(Kind::Return(Val::new(a)))
 }
 
 /// `p`, made when the run gets to it: a recursion built lazily
@@ -183,14 +196,14 @@ impl<R, A: 'static> Eff<R, A> {
         F: Fn(A) -> N + 'static,
         Self: Bind<N>,
     {
-        let frame: Frame = Rc::new(move |v: Val| f(take::<A>(v)).into_node());
-        <Self as Bind<N>>::Out::from_node(Node(Kind::Bind(Box::new(self.node), frame)))
+        let frame: Frame = Rc::new(move |v: Val| f(v.take::<A>()).into_node());
+        <Self as Bind<N>>::Out::from_node(Node(bound(self.node.0, frame)))
     }
 
     /// `f` of the value
     pub fn map<B: 'static>(self, f: impl Fn(A) -> B + 'static) -> Eff<R, B> {
-        let frame: Frame = Rc::new(move |v: Val| Node(Kind::Return(Box::new(f(take::<A>(v))))));
-        Eff::of(Kind::Bind(Box::new(self.node), frame))
+        let frame: Frame = Rc::new(move |v: Val| Node(Kind::Return(Val::new(f(v.take::<A>())))));
+        Eff::of(bound(self.node.0, frame))
     }
 
     /// a PLAIN effect `E` handled by `h`, wherever it is in the row: the row without it, `T`, the handler's
@@ -248,17 +261,10 @@ impl<R, A: 'static> Eff<R, A> {
 impl<A: 'static> Eff<Nil, A> {
     /// the value: a program of no effect run
     pub fn run(self) -> A {
-        take::<A>(crate::machine::run(self.node))
+        crate::machine::run(self.node).take::<A>()
     }
 }
 
-/// a value taken back at its type: the type it was made at — the typed API allows no other
-pub(crate) fn take<A: 'static>(v: Val) -> A {
-    match v.downcast::<A>() {
-        Ok(a) => *a,
-        Err(_) => panic!("okay: a value taken at another type than it was made at — a reply given to another operation"),
-    }
-}
 
 /// THE REPLY to an operation: the only way to its value — `give` it (a handler answering in place), or `resume` the
 /// rest with it (a handler taking the rest). Made by `perform` alone, one for each operation
@@ -283,12 +289,12 @@ pub struct Answer(pub(crate) Val);
 impl<T: 'static> Reply<T> {
     /// the operation's value `t`
     pub fn give(self, t: T) -> Answer {
-        Answer(Box::new(t))
+        Answer(Val::new(t))
     }
 
     /// the rest `k` resumed with `t`: a program over the row outside the handler, of its answer
     pub fn resume<R, B>(self, k: &crate::handler::K<R, B>, t: T) -> Eff<R, B> {
-        Eff::of(Kind::Resume(k.k.clone(), Box::new(t)))
+        Eff::of(Kind::Resume(k.k.clone(), Val::new(t)))
     }
 }
 
@@ -308,14 +314,14 @@ impl AnyOp {
 
     /// the operation as written: `Put(6, _)`
     pub fn describe(&self) -> String {
-        (self.0.describe)(&*self.0.value)
+        (self.0.describe)(&self.0.value)
     }
 
     /// passed on, to the handler further out: its answer to the rest `k`
     pub fn proceed<T, B>(self, k: &crate::handler::K<T, B>) -> Eff<T, B> {
         let k0 = k.k.clone();
         let frame: Frame = Rc::new(move |v: Val| Node(Kind::Resume(k0.clone(), v)));
-        Eff::of(Kind::Bind(Box::new(Node(Kind::Perform(self.0))), frame))
+        Eff::of(Kind::Inject(self.0, frame))
     }
 
     /// passed on, its answer told to `after` — a program run before the rest gets it, each time it gets it (a rest
@@ -329,12 +335,12 @@ impl AnyOp {
         let describe = self.0.describe_answer;
         let copy = self.0.copy_answer;
         let frame: Frame = Rc::new(move |v: Val| {
-            let told = after(describe(&*v)).node;
+            let told = after(describe(&v)).node;
             let k0 = k0.clone();
-            let back: Frame = Rc::new(move |_| Node(Kind::Resume(k0.clone(), copy(&*v))));
-            Node(Kind::Bind(Box::new(told), back))
+            let back: Frame = Rc::new(move |_| Node(Kind::Resume(k0.clone(), copy(&v))));
+            Node(bound(told.0, back))
         });
-        Eff::of(Kind::Bind(Box::new(Node(Kind::Perform(self.0))), frame))
+        Eff::of(Kind::Inject(self.0, frame))
     }
 }
 
