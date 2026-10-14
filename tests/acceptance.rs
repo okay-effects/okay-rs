@@ -58,10 +58,13 @@ fn d_a_cell_inside_the_choice_one_for_the_run() {
     );
 }
 
+#[derive(Clone, Debug)]
 enum Two {
     Pick(Reply<i64>),
 }
-impl Effect for Two {}
+impl Effect for Two {
+    type Kind = Plain;
+}
 
 /// "A/D. the rests made first, resumed later and in reverse: each its state as it was when captured"
 #[test]

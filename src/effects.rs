@@ -2,22 +2,27 @@
 
 use crate::eff::{perform, pure, Eff, Never, Reply};
 use crate::handler::{Handler, K};
-use crate::row::{Effect, Member};
+use std::fmt::Debug;
+
+use crate::row::{Effect, Member, Plain};
 
 // READER: a value asked
 
+#[derive(Clone, Debug)]
 pub enum Reader<V> {
     Ask(Reply<V>),
 }
-impl<V: 'static> Effect for Reader<V> {}
+impl<V: Clone + Debug + 'static> Effect for Reader<V> {
+    type Kind = Plain;
+}
 
 /// the value asked of the reader
-pub fn ask<V: 'static, R: Member<Reader<V>, Ix>, Ix>() -> Eff<R, V> {
+pub fn ask<V: Clone + Debug + 'static, R: Member<Reader<V>, Ix>, Ix>() -> Eff<R, V> {
     perform(Reader::Ask)
 }
 
 /// each ask answered `v`, in place
-pub fn reader<V: Clone + 'static, T, A: 'static>(v: V) -> Handler<Reader<V>, T, A, A> {
+pub fn reader<V: Clone + Debug + 'static, T, A: 'static>(v: V) -> Handler<Reader<V>, T, A, A> {
     Handler::answering(move |op| match op {
         Reader::Ask(r) => r.give(v.clone()),
     }, |a| a)
@@ -25,27 +30,30 @@ pub fn reader<V: Clone + 'static, T, A: 'static>(v: V) -> Handler<Reader<V>, T, 
 
 // STATE: a value read and written
 
+#[derive(Clone, Debug)]
 pub enum State<S> {
     Get(Reply<S>),
     Put(S, Reply<()>),
 }
-impl<S: 'static> Effect for State<S> {}
+impl<S: Clone + Debug + 'static> Effect for State<S> {
+    type Kind = Plain;
+}
 
-pub fn get<S: 'static, R: Member<State<S>, Ix>, Ix>() -> Eff<R, S> {
+pub fn get<S: Clone + Debug + 'static, R: Member<State<S>, Ix>, Ix>() -> Eff<R, S> {
     perform(State::Get)
 }
 
-pub fn put<S: 'static, R: Member<State<S>, Ix>, Ix>(s: S) -> Eff<R, ()> {
+pub fn put<S: Clone + Debug + 'static, R: Member<State<S>, Ix>, Ix>(s: S) -> Eff<R, ()> {
     perform(|r| State::Put(s, r))
 }
 
 /// the state moved by `f`
-pub fn modify<S: 'static, R: Member<State<S>, Ix> + 'static, Ix: 'static>(f: impl Fn(S) -> S + 'static) -> Eff<R, ()> {
+pub fn modify<S: Clone + Debug + 'static, R: Member<State<S>, Ix> + 'static, Ix: 'static>(f: impl Fn(S) -> S + 'static) -> Eff<R, ()> {
     get::<S, R, Ix>().flat_map(move |s| put::<S, R, Ix>(f(s)))
 }
 
 /// the state from `s0`: the last state and the value
-pub fn state<S: Clone + 'static, T, A: 'static>(s0: S) -> Handler<State<S>, T, A, (S, A)> {
+pub fn state<S: Clone + Debug + 'static, T, A: 'static>(s0: S) -> Handler<State<S>, T, A, (S, A)> {
     Handler::stateful(s0, |s: &mut S, op| match op {
         State::Get(r) => r.give(s.clone()),
         State::Put(n, r) => {
@@ -57,17 +65,20 @@ pub fn state<S: Clone + 'static, T, A: 'static>(s0: S) -> Handler<State<S>, T, A
 
 // WRITER: values told
 
+#[derive(Clone, Debug)]
 pub enum Writer<W> {
     Tell(W, Reply<()>),
 }
-impl<W: 'static> Effect for Writer<W> {}
+impl<W: Clone + Debug + 'static> Effect for Writer<W> {
+    type Kind = Plain;
+}
 
-pub fn tell<W: 'static, R: Member<Writer<W>, Ix>, Ix>(w: W) -> Eff<R, ()> {
+pub fn tell<W: Clone + Debug + 'static, R: Member<Writer<W>, Ix>, Ix>(w: W) -> Eff<R, ()> {
     perform(|r| Writer::Tell(w, r))
 }
 
 /// the told, in order, and the value
-pub fn collect<W: Clone + 'static, T, A: 'static>() -> Handler<Writer<W>, T, A, (Vec<W>, A)> {
+pub fn collect<W: Clone + Debug + 'static, T, A: 'static>() -> Handler<Writer<W>, T, A, (Vec<W>, A)> {
     Handler::stateful(Vec::new(), |s: &mut Vec<W>, op| match op {
         Writer::Tell(w, r) => {
             s.push(w);
@@ -78,13 +89,16 @@ pub fn collect<W: Clone + 'static, T, A: 'static>() -> Handler<Writer<W>, T, A, 
 
 // CHOICE: one of several, each path through the choices a value — multi-shot, the rest resumed for each
 
+#[derive(Clone, Debug)]
 pub enum Choose {
     /// one of `n`, its index
     Among(usize, Reply<usize>),
     /// none: the path dropped
     Fail(Reply<Never>),
 }
-impl Effect for Choose {}
+impl Effect for Choose {
+    type Kind = Plain;
+}
 
 /// one of the values, each in turn
 pub fn among<A: Clone + 'static, R: Member<Choose, Ix>, Ix>(xs: Vec<A>) -> Eff<R, A> {
@@ -128,17 +142,20 @@ fn paths<T: 'static, A: Clone + 'static>(k: K<T, Vec<A>>, r: Reply<usize>, i: us
 
 // THROWS: an error raised, the rest dropped
 
+#[derive(Clone, Debug)]
 pub enum Throws<E> {
     Raise(E, Reply<Never>),
 }
-impl<E: 'static> Effect for Throws<E> {}
+impl<E: Clone + Debug + 'static> Effect for Throws<E> {
+    type Kind = Plain;
+}
 
-pub fn raise<E: 'static, A: 'static, R: Member<Throws<E>, Ix>, Ix>(e: E) -> Eff<R, A> {
+pub fn raise<E: Clone + Debug + 'static, A: 'static, R: Member<Throws<E>, Ix>, Ix>(e: E) -> Eff<R, A> {
     perform(|r| Throws::Raise(e, r)).map(|n: Never| match n {})
 }
 
 /// the value, or the error raised
-pub fn either<E: 'static, T, A: 'static>() -> Handler<Throws<E>, T, A, Result<A, E>> {
+pub fn either<E: Clone + Debug + 'static, T, A: 'static>() -> Handler<Throws<E>, T, A, Result<A, E>> {
     Handler::deep(|a| pure(Ok(a)), |op, _k| match op {
         Throws::Raise(e, _) => pure(Err(e)),
     })

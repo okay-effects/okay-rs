@@ -16,6 +16,18 @@
   bound is `Clone`.
 - Tests are okay-one's, named after them (`tests/std.rs` = TestStd, `tests/acceptance.rs` = TestAcceptance); port the
   next ones the same way.
+- INTERCEPTORS, the point of it all — control and audit of effects (`tests/intercept.rs` is the specification, to be
+  ported to okay-one with the same names):
+  - an effect is `Plain` or `Sensitive` (`Effect::Kind`). A sensitive one is handled only by `handle_audited`, which
+    needs `Audited<S>` in the row; only `audit` (an `Interceptor` of `S`) or `observe` puts it there, in the row
+    outside them — where no program can perform `S`. A plain `handle`/`intercept` of it does not compile.
+  - `intercept`: a plain effect handled again for a part of a program, its clauses outside it (their own operations
+    reach the handler further out). `audit`: the same for a sensitive one, its clauses given `Pass<S>`, the only way
+    to perform `S` past the audit — each operation told, passed on changed, or refused.
+  - `observe`: an `Observer` sees every operation of every effect on its way out (`AnyOp`: its effect, `Debug`
+    description), passes it on (`proceed`, `proceed_then` telling its answer each time the rest gets it) or refuses
+    it. So an operation's value is `Clone + Debug`, and an effect's enum too.
+  - the trail is an effect, `audit::Audit` (`record`, handled by `trail()`), outside the interceptors.
 - Stage 2 (not yet): `Cont<R, I, O, A>` for answer-type modification — `$`/`reset`, `shift0`, `PState` — with
   `Bind` impls for the four pairs of `Eff`/`Cont` (no overlap, so no specialization); `on_unimplemented` messages.
 - No casts outside `take`/`take_op`/`state` (the erased machine's three); no panics but theirs and the machine's

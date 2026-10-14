@@ -41,9 +41,11 @@ mod handler;
 mod machine;
 mod row;
 
-pub use eff::{perform, pure, Answer, Bind, Eff, Never, Node, Program, Reply};
-pub use handler::{Handler, K};
-pub use row::{Cons, Effect, Here, Member, Nil, There};
+pub mod audit;
+
+pub use eff::{perform, pure, Answer, AnyOp, Bind, Eff, Never, Node, Pass, Program, Reply};
+pub use handler::{Handler, Interceptor, Observer, K};
+pub use row::{AuditAll, Audited, Cons, Effect, Here, Kind, Mark, MarkKind, Member, Nil, Plain, PlainKind, Sensitive, There};
 
 /// A FOR OVER PROGRAMS: `x <- p;` binds `p`'s value, `_ <- p;` or `p;` drops it, `let x = v;` names a value, the last
 /// line a program or `yield v`. The rests are closures called as many times as a handler resumes them: each takes

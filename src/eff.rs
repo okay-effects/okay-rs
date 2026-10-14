@@ -3,11 +3,12 @@
 //! was made at, which the typed API makes the only one possible.
 
 use std::any::{Any, TypeId};
+use std::fmt::{self, Debug};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::handler::Handler;
-use crate::row::{Effect, Member, Nil};
+use crate::handler::{Handler, Interceptor, Observer};
+use crate::row::{AuditAll, Audited, Effect, Mark, Member, Nil, PlainKind, Sensitive};
 
 /// a value on its way, erased
 pub(crate) type Val = Box<dyn Any>;
@@ -24,12 +25,66 @@ pub(crate) enum Kind {
     Return(Val),
     /// a program, then the rest given its value
     Bind(Box<Node>, Frame),
-    /// an operation of the effect whose type id is given: its handler the nearest of that effect
-    Perform(TypeId, Box<dyn Any>),
+    /// an operation: its handler the nearest of its effect — or an observer before it
+    Perform(Op),
     /// a handler entered: its level, the body under it
     Handle(Box<Node>, crate::machine::Level),
     /// a `k` resumed: its levels put back, the value to its frames
     Resume(crate::machine::K0, Val),
+}
+
+/// AN OPERATION ERASED, with what an observer needs of it: its effect, a description, a copy — and of its answer the
+/// same, made where its type was known
+pub(crate) struct Op {
+    pub(crate) effect: TypeId,
+    pub(crate) name: &'static str,
+    pub(crate) value: Box<dyn Any>,
+    describe: fn(&dyn Any) -> String,
+    copy: fn(&dyn Any) -> Box<dyn Any>,
+    pub(crate) describe_answer: fn(&dyn Any) -> String,
+    pub(crate) copy_answer: fn(&dyn Any) -> Val,
+}
+
+impl Op {
+    fn of<E: Effect, T: Clone + Debug + 'static>(e: E) -> Op {
+        Op {
+            effect: TypeId::of::<E>(),
+            name: std::any::type_name::<E>(),
+            value: Box::new(e),
+            describe: describe_as::<E>,
+            copy: copy_as::<E>,
+            describe_answer: describe_as::<T>,
+            copy_answer: copy_as::<T>,
+        }
+    }
+}
+
+impl Clone for Op {
+    fn clone(&self) -> Self {
+        Op {
+            effect: self.effect,
+            name: self.name,
+            value: (self.copy)(&*self.value),
+            describe: self.describe,
+            copy: self.copy,
+            describe_answer: self.describe_answer,
+            copy_answer: self.copy_answer,
+        }
+    }
+}
+
+fn describe_as<T: Debug + 'static>(v: &dyn Any) -> String {
+    match v.downcast_ref::<T>() {
+        Some(t) => format!("{t:?}"),
+        None => String::from("?"),
+    }
+}
+
+fn copy_as<T: Clone + 'static>(v: &dyn Any) -> Box<dyn Any> {
+    match v.downcast_ref::<T>() {
+        Some(t) => Box::new(t.clone()),
+        None => panic!("okay: a value copied at another type than it was made at"),
+    }
 }
 
 /// A PROGRAM OF EFFECTS over the row `R`, of the value `A`
@@ -79,12 +134,13 @@ pub fn pure<R, A: 'static>(a: A) -> Eff<R, A> {
 }
 
 /// AN OPERATION of `E`, in the row `R`: `make` its variant given its reply — `perform(Reader::Ask)`, `perform(|r|
-/// State::Put(s, r))`; the program's value what its handler gives back
-pub fn perform<R, E: Effect, Ix, T: 'static>(make: impl FnOnce(Reply<T>) -> E) -> Eff<R, T>
+/// State::Put(s, r))`; the program's value what its handler gives back. The value `Clone` and `Debug`: what crosses
+/// the boundary of effects can be told and kept
+pub fn perform<R, E: Effect, Ix, T: Clone + Debug + 'static>(make: impl FnOnce(Reply<T>) -> E) -> Eff<R, T>
 where
     R: Member<E, Ix>,
 {
-    Eff::of(Kind::Perform(TypeId::of::<E>(), Box::new(make(Reply(PhantomData)))))
+    Eff::of(Kind::Perform(Op::of::<E, T>(make(Reply(PhantomData)))))
 }
 
 impl<R, A: 'static> Eff<R, A> {
@@ -104,12 +160,55 @@ impl<R, A: 'static> Eff<R, A> {
         Eff::of(Kind::Bind(Box::new(self.node), frame))
     }
 
-    /// `E` handled by `h`, wherever it is in the row: the row without it, `T`, the handler's
+    /// a PLAIN effect `E` handled by `h`, wherever it is in the row: the row without it, `T`, the handler's
     pub fn handle<E: Effect, Ix, B: 'static>(self, h: Handler<E, R::Rest, A, B>) -> Eff<R::Rest, B>
     where
+        E::Kind: PlainKind,
         R: Member<E, Ix>,
     {
         Eff::of(Kind::Handle(Box::new(self.node), h.level))
+    }
+
+    /// a SENSITIVE effect handled — only under its audit: `Audited<S>` in the row, put there by `audit` or `observe`
+    pub fn handle_audited<S: Effect<Kind = Sensitive>, Ix, B: 'static>(
+        self,
+        h: Handler<S, R::Rest, A, B>,
+    ) -> Eff<R::Rest, B>
+    where
+        R: Member<Audited<S>, Ix>,
+    {
+        Eff::of(Kind::Handle(Box::new(self.node), h.level))
+    }
+
+    /// a PLAIN effect INTERCEPTED for this program: its operations to `h`'s clauses, which run outside it — their own
+    /// operations of `E` reach the handler further out. The row the same
+    pub fn intercept<E: Effect, Ix, B: 'static>(self, h: Handler<E, R, A, B>) -> Eff<R, B>
+    where
+        E::Kind: PlainKind,
+        R: Member<E, Ix>,
+    {
+        Eff::of(Kind::Handle(Box::new(self.node), h.level))
+    }
+
+    /// a SENSITIVE effect AUDITED: its operations to `i`'s clauses — each passed on (`Pass`), changed, or refused;
+    /// outside, `Audited<S>` in the row: no program there performs `S`, and only `handle_audited` handles it
+    pub fn audit<S: Effect<Kind = Sensitive>, Ix, B: 'static>(
+        self,
+        i: Interceptor<S, <R as Mark<S, Ix>>::Out, A, B>,
+    ) -> Eff<<R as Mark<S, Ix>>::Out, B>
+    where
+        R: Mark<S, Ix>,
+    {
+        Eff::of(Kind::Handle(Box::new(self.node), i.level))
+    }
+
+    /// every operation OBSERVED on its way out, whatever its effect: `o`'s clause given it — told, passed on or
+    /// refused. Outside, every sensitive effect of the row audited
+    pub fn observe<B: 'static>(self, o: Observer<<R as AuditAll>::Out, A, B>) -> Eff<<R as AuditAll>::Out, B>
+    where
+        R: AuditAll,
+    {
+        Eff::of(Kind::Handle(Box::new(self.node), o.level))
     }
 }
 
@@ -139,6 +238,12 @@ impl<T> Clone for Reply<T> {
 }
 impl<T> Copy for Reply<T> {}
 
+impl<T> Debug for Reply<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("_")
+    }
+}
+
 /// the value given to an operation, erased: made by a `Reply`
 pub struct Answer(pub(crate) Val);
 
@@ -155,4 +260,93 @@ impl<T: 'static> Reply<T> {
 }
 
 /// no value: an operation that never comes back (`fail`, `raise`)
+#[derive(Clone, Debug)]
 pub enum Never {}
+
+/// AN OPERATION SEEN BY AN OBSERVER, whatever its effect: what it is, and the way on
+#[derive(Clone)]
+pub struct AnyOp(pub(crate) Op);
+
+impl AnyOp {
+    /// its effect, the type's name without its path: `Reader<i64>`
+    pub fn effect(&self) -> String {
+        short(self.0.name)
+    }
+
+    /// the operation as written: `Put(6, _)`
+    pub fn describe(&self) -> String {
+        (self.0.describe)(&*self.0.value)
+    }
+
+    /// passed on, to the handler further out: its answer to the rest `k`
+    pub fn proceed<T, B>(self, k: &crate::handler::K<T, B>) -> Eff<T, B> {
+        let k0 = k.k.clone();
+        let frame: Frame = Rc::new(move |v: Val| Node(Kind::Resume(k0.clone(), v)));
+        Eff::of(Kind::Bind(Box::new(Node(Kind::Perform(self.0))), frame))
+    }
+
+    /// passed on, its answer told to `after` — a program run before the rest gets it, each time it gets it (a rest
+    /// resumed twice, twice)
+    pub fn proceed_then<T: 'static, B>(
+        self,
+        k: &crate::handler::K<T, B>,
+        after: impl Fn(String) -> Eff<T, ()> + 'static,
+    ) -> Eff<T, B> {
+        let k0 = k.k.clone();
+        let describe = self.0.describe_answer;
+        let copy = self.0.copy_answer;
+        let frame: Frame = Rc::new(move |v: Val| {
+            let told = after(describe(&*v)).node;
+            let k0 = k0.clone();
+            let back: Frame = Rc::new(move |_| Node(Kind::Resume(k0.clone(), copy(&*v))));
+            Node(Kind::Bind(Box::new(told), back))
+        });
+        Eff::of(Kind::Bind(Box::new(Node(Kind::Perform(self.0))), frame))
+    }
+}
+
+/// a type's name, its paths dropped: `okay::effects::Reader<i64>` to `Reader<i64>`
+fn short(name: &str) -> String {
+    let mut out = String::new();
+    let mut word = String::new();
+    let mut chars = name.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ':' && chars.peek() == Some(&':') {
+            chars.next();
+            word.clear();
+        } else if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            out.push_str(&word);
+            word.clear();
+            out.push(c);
+        }
+    }
+    out.push_str(&word);
+    out
+}
+
+/// THE WAY ON for an auditor of `S`: its operations performed further out, typed — given to the clauses of an
+/// interceptor of `S` alone, so no other program performs `S` past the audit
+pub struct Pass<S>(PhantomData<fn() -> S>);
+
+impl<S> Clone for Pass<S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<S> Copy for Pass<S> {}
+
+impl<S: Effect> Pass<S> {
+    pub(crate) fn new() -> Self {
+        Pass(PhantomData)
+    }
+
+    /// an operation of `S` performed past the audit — the one asked, or another
+    pub fn perform<T, Ix, X: Clone + Debug + 'static>(self, make: impl FnOnce(Reply<X>) -> S) -> Eff<T, X>
+    where
+        T: Member<Audited<S>, Ix>,
+    {
+        Eff::of(Kind::Perform(Op::of::<S, X>(make(Reply(PhantomData)))))
+    }
+}

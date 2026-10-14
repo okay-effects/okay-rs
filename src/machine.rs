@@ -7,7 +7,7 @@
 use std::any::{Any, TypeId};
 use std::rc::Rc;
 
-use crate::eff::{Frame, Kind, Node, Val};
+use crate::eff::{Frame, Kind, Node, Op, Val};
 
 pub(crate) struct AnsweringRt {
     pub(crate) value: Box<dyn Fn(Box<dyn Any>) -> Val>,
@@ -27,6 +27,11 @@ pub(crate) struct DeepRt {
     pub(crate) apply: Box<dyn Fn(Box<dyn Any>, K0) -> Node>,
 }
 
+pub(crate) struct ObserveRt {
+    pub(crate) ret: Box<dyn Fn(Val) -> Node>,
+    pub(crate) apply: Box<dyn Fn(Op, K0) -> Node>,
+}
+
 /// a level: the top, or a handler's — its effect's type id, its runtime, a state's register
 #[derive(Clone)]
 pub(crate) enum Level {
@@ -34,13 +39,17 @@ pub(crate) enum Level {
     Answering(TypeId, Rc<AnsweringRt>),
     Stateful(TypeId, Rc<StatefulRt>, Rc<dyn Any>),
     Deep(TypeId, Rc<DeepRt>),
+    /// an observer: every operation on its way out stops here first
+    Observe(Rc<ObserveRt>),
 }
 
 impl Level {
-    fn effect(&self) -> Option<TypeId> {
+    /// the operations of `e` stop here: a handler of `e`, or an observer
+    fn catches(&self, e: TypeId) -> bool {
         match self {
-            Level::Top => None,
-            Level::Answering(e, _) | Level::Stateful(e, _, _) | Level::Deep(e, _) => Some(*e),
+            Level::Top => false,
+            Level::Answering(f, _) | Level::Stateful(f, _, _) | Level::Deep(f, _) => *f == e,
+            Level::Observe(_) => true,
         }
     }
 }
@@ -74,6 +83,7 @@ pub(crate) fn run(node: Node) -> Val {
                         Some(Level::Answering(_, rt)) => Kind::Return((rt.ret)(v)),
                         Some(Level::Stateful(_, rt, s)) => Kind::Return((rt.ret)(s, v)),
                         Some(Level::Deep(_, rt)) => (rt.ret)(v).0,
+                        Some(Level::Observe(rt)) => (rt.ret)(v).0,
                     },
                 }
             }
@@ -87,19 +97,26 @@ pub(crate) fn run(node: Node) -> Val {
                 stack.push(Segment { level, frames: Vec::new() });
                 body.0
             }
-            Kind::Perform(e, op) => {
-                // the nearest level of the effect: there is one — the row says so, and `run` takes no row but `Nil`
-                let Some(i) = stack.iter().rposition(|s| s.level.effect() == Some(e)) else {
+            Kind::Perform(op) => {
+                // the nearest level of the effect, or an observer before it: there is one — the row says so, and
+                // `run` takes no row but `Nil`
+                let Some(i) = stack.iter().rposition(|s| s.level.catches(op.effect)) else {
                     panic!("okay: an operation with no handler — a row not checked")
                 };
                 match &mut stack[i].level {
-                    Level::Answering(_, rt) => Kind::Return((rt.value)(op)),
+                    Level::Answering(_, rt) => Kind::Return((rt.value)(op.value)),
                     Level::Stateful(_, rt, s) => {
-                        let (s2, v) = (rt.step)(std::mem::replace(s, hole.clone()), op);
+                        let (s2, v) = (rt.step)(std::mem::replace(s, hole.clone()), op.value);
                         *s = s2;
                         Kind::Return(v)
                     }
                     Level::Deep(_, rt) => {
+                        let rt = rt.clone();
+                        let k = K0(Rc::new(stack.split_off(i)));
+                        (rt.apply)(op.value, k).0
+                    }
+                    // an observer: the rest taken as a handler's, its clause run outside it with the whole operation
+                    Level::Observe(rt) => {
                         let rt = rt.clone();
                         let k = K0(Rc::new(stack.split_off(i)));
                         (rt.apply)(op, k).0

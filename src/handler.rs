@@ -6,8 +6,8 @@ use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::eff::{take, Answer, Eff, Node, Val};
-use crate::machine::{AnsweringRt, DeepRt, K0, Level, StatefulRt};
+use crate::eff::{take, Answer, AnyOp, Eff, Node, Op, Pass, Val};
+use crate::machine::{AnsweringRt, DeepRt, K0, Level, ObserveRt, StatefulRt};
 use crate::row::Effect;
 
 /// the types of a handler, the compiler's only
@@ -77,6 +77,48 @@ impl<E: Effect, T, A: 'static, B: 'static> Handler<E, T, A, B> {
             }),
         };
         Handler { level: Level::Deep(TypeId::of::<E>(), Rc::new(rt)), _t: PhantomData }
+    }
+}
+
+/// AN INTERCEPTOR of the sensitive effect `S`: its clauses given each operation, the rest `k`, and the way on
+/// (`Pass`) — over the row `T` outside the audit, `Audited<S>` in it; `ret` of the body's value
+pub struct Interceptor<S, T, A, B> {
+    pub(crate) level: Level,
+    _t: Types<S, T, A, B>,
+}
+
+impl<S: Effect, T, A: 'static, B: 'static> Interceptor<S, T, A, B> {
+    pub fn new(
+        ret: impl Fn(A) -> Eff<T, B> + 'static,
+        apply: impl Fn(S, K<T, B>, Pass<S>) -> Eff<T, B> + 'static,
+    ) -> Self {
+        let rt = DeepRt {
+            ret: Box::new(move |v: Val| ret(take::<A>(v)).node),
+            apply: Box::new(move |op: Box<dyn Any>, k: K0| -> Node {
+                apply(take_op::<S>(op), K { k, _t: PhantomData }, Pass::new()).node
+            }),
+        };
+        Interceptor { level: Level::Deep(TypeId::of::<S>(), Rc::new(rt)), _t: PhantomData }
+    }
+}
+
+/// AN OBSERVER of every operation on its way out, whatever its effect: its clause given the operation (`AnyOp`) and
+/// the rest `k` — over the row `T` outside it; `ret` of the body's value
+pub struct Observer<T, A, B> {
+    pub(crate) level: Level,
+    _t: Types<(), T, A, B>,
+}
+
+impl<T, A: 'static, B: 'static> Observer<T, A, B> {
+    pub fn new(
+        ret: impl Fn(A) -> Eff<T, B> + 'static,
+        apply: impl Fn(AnyOp, K<T, B>) -> Eff<T, B> + 'static,
+    ) -> Self {
+        let rt = ObserveRt {
+            ret: Box::new(move |v: Val| ret(take::<A>(v)).node),
+            apply: Box::new(move |op: Op, k: K0| -> Node { apply(AnyOp(op), K { k, _t: PhantomData }).node }),
+        };
+        Observer { level: Level::Observe(Rc::new(rt)), _t: PhantomData }
     }
 }
 
