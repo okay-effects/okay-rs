@@ -74,16 +74,27 @@ pub(crate) struct Segment {
 #[derive(Clone)]
 pub(crate) struct K0(Rc<RefCell<Vec<Segment>>>);
 
+/// the vectors of levels of rests resumed once, kept for the next rest taken: none allocated for most
+type Pool = Vec<Vec<Segment>>;
+
 impl K0 {
-    /// the levels from `i` up taken off `stack`
-    fn take(stack: &mut Vec<Segment>, i: usize) -> K0 {
-        K0(Rc::new(RefCell::new(stack.split_off(i))))
+    /// the levels from `i` up taken off `stack`, into a vector from the pool
+    fn take(stack: &mut Vec<Segment>, i: usize, pool: &mut Pool) -> K0 {
+        let mut taken = pool.pop().unwrap_or_default();
+        taken.extend(stack.drain(i..));
+        K0(Rc::new(RefCell::new(taken)))
     }
 
-    /// the levels put back on `stack`
-    fn put(self, stack: &mut Vec<Segment>) {
+    /// the levels put back on `stack`; a vector moved back, to the pool
+    fn put(self, stack: &mut Vec<Segment>, pool: &mut Pool) {
         match Rc::try_unwrap(self.0) {
-            Ok(levels) => stack.extend(levels.into_inner()),
+            Ok(levels) => {
+                let mut levels = levels.into_inner();
+                stack.append(&mut levels);
+                if pool.len() < 64 {
+                    pool.push(levels);
+                }
+            }
             Err(shared) => {
                 let mut levels = shared.borrow_mut();
                 for s in levels.iter_mut() {
@@ -103,6 +114,7 @@ pub(crate) fn run(node: Node) -> Val {
     let mut stack: Vec<Segment> = vec![Segment { level: Level::Top, frames: Vec::new() }];
     // in a state's place while it is moved: the state taken out, so that no one else holds it and it is written in place
     let hole: Rc<dyn Any> = Rc::new(());
+    let mut pool: Pool = Vec::new();
     let mut cur = node.0;
     loop {
         cur = match cur {
@@ -168,7 +180,7 @@ pub(crate) fn run(node: Node) -> Val {
                     }
                     Level::Deep(_, rt) => {
                         let rt = rt.clone();
-                        let k = K0::take(&mut stack, i);
+                        let k = K0::take(&mut stack, i, &mut pool);
                         (rt.apply)(op.value, k).0
                     }
                     // dropping the rest: the levels from it up dropped, no `k` made; its program outside it
@@ -180,7 +192,7 @@ pub(crate) fn run(node: Node) -> Val {
                     // an observer: the rest taken as a handler's, its clause run outside it with the whole operation
                     Level::Observe(rt) => {
                         let rt = rt.clone();
-                        let k = K0::take(&mut stack, i);
+                        let k = K0::take(&mut stack, i, &mut pool);
                         (rt.apply)(op, k).0
                     }
                     Level::Top => panic!("okay: the top handles no effect"),
@@ -188,7 +200,7 @@ pub(crate) fn run(node: Node) -> Val {
             }
             Kind::Defer(p) => p().0,
             Kind::Resume(k, v) => {
-                k.put(&mut stack);
+                k.put(&mut stack, &mut pool);
                 Kind::Return(v)
             }
         }
