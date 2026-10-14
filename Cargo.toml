@@ -1,0 +1,10 @@
+[package]
+name = "okay-rs"
+version = "0.1.0"
+edition = "2024"
+description = "okay-one in Rust: a program of effects as data, rows of effects, handlers not tied to the monad, k as data"
+
+[lib]
+name = "okay"
+
+[dependencies]
