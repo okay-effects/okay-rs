@@ -187,6 +187,36 @@ Checked by `compile_fail` doc tests (`src/lib.rs`, `src/audit.rs`), each failing
 - **Known gap**: a `Reply` kept from one operation and given to another panics (a value taken at another type);
   closing it wants the reply branded by a lifetime.
 
+## Speed
+
+okay-core's kernel lanes (`KernelBenchmark`), the same programs and n, ported to `benches/kernel.rs`; one machine (an
+Apple Mac), two interleaved rounds, JMH's AverageTime for Scala, the same warm-up and rounds for Rust
+(`cargo bench --bench kernel`, run under JMH's lock). µs per run:
+
+| lane | Scala (okay-core, JVM 26) | Rust (okay-rs) | Rust / Scala |
+|---|---|---|---|
+| `pure` — isEven/isOdd, 1000 binds | 3.08 | 19.95 | 6.5× |
+| `answered` — an operation answered in place, each step | 5.58 | 37.69 | 6.8× |
+| `general` — a `deep` handler, `k` each step | 9.44 | 82.64 | 8.8× |
+| `forwarded` / `forwarded16` — past 1 / 16 handlers | 5.53 / 5.83 | 36.89 / 48.18 | 6.7× / 8.3× |
+| `forwardedK` / `forwardedK16` | 20.28 / 139.80 | 84.43 / 197.29 | 4.2× / 1.4× |
+| `reads` / `writer` | 3.15 / 9.45 | 29.61 / 31.59 | 9.4× / 3.3× |
+| `stateCell` / `state` / `stateDeep` | 9.34 / 12.47 / 12.02 | 71.60 / 72.56 / 80.13 | 7.7× / 5.8× / 6.7× |
+| `leftMaps` / `rightMaps` | 4.92 / 7.75 | 31.77 / 36.55 | 6.5× / 4.7× |
+| `throwing` — a handler in the program, each raise | 20.23 | 139.58 | 6.9× |
+| `choose` — every value of a choice among 1000 | 13.24 | 124.41 | 9.4× |
+
+**Rust is 4–9× slower today.** Not the language: the machine as written. Each step allocates — a `Box<Node>` for the
+program bound, an `Rc<dyn Fn>` frame, a `Box<dyn Any>` value, `Vec` pushes of the level stack — through the system
+`malloc`, where the JVM bumps a pointer and C2 removes many objects altogether. With mimalloc as the allocator the
+lanes are 1.6–1.8× faster (`pure` 12.8, `answered` 21.6, `general` 46.3, `state` 44.5, `choose` 75.2) — still
+3.5–6× behind: the count of allocations and the dynamic calls are the rest. `forwardedK16`, where Scala rebuilds
+sixteen levels into `k` each step, is the closest (1.4×).
+
+What would close it, in order: values unboxed in the common case (a small-value slot instead of `Box<dyn Any>`),
+frames `FnOnce` and moved when no `k` shares them (an `Rc` only for multi-shot), the program's nodes from an arena,
+the handler found by an index cached on the operation (as okay-core's path cache) instead of a `TypeId` search.
+
 ## Next
 
 Stage 2: answer-type modification — `Cont<R, I, O, A>`, `$`/`reset`, `shift0`, `PState` and the protocol of

@@ -8,3 +8,11 @@ description = "okay-one in Rust: a program of effects as data, rows of effects, 
 name = "okay"
 
 [dependencies]
+
+[[bench]]
+name = "kernel"
+harness = false
+
+[profile.release]
+codegen-units = 1
+lto = true
