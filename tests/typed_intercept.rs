@@ -74,14 +74,16 @@ where
     }
 }
 
-async fn payments<C: Has<Pay, I>, I>(cx: &C) -> i64 {
-    eff! {
-        _ <- transfer(cx, " acct-1234 ".into(), 100);
-        b <- balance(cx);
-        _ <- transfer(cx, "acct-77".into(), 5000);
-        yield b
+okay::needs! {
+    async fn payments(cx: [Pay]) -> i64 {
+        eff! {
+            _ <- transfer(cx, " acct-1234 ".into(), 100);
+            b <- balance(cx);
+            _ <- transfer(cx, "acct-77".into(), 5000);
+            yield b
+        }
+        .await
     }
-    .await
 }
 
 /// "a sensitive effect under its audit: passed on changed, told masked, refused over the limit"

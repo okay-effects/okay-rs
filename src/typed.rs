@@ -12,15 +12,16 @@
 //! use okay::effects::{Reader, State, Writer};
 //! use okay::typed::*;
 //!
-//! async fn counted<C, I1, I2, I3>(cx: &C, n: i64) -> i64
-//! where C: Has<Reader<i64>, I1> + Has<State<i64>, I2> + Has<Writer<String>, I3> {
-//!     eff! {
-//!         d <- ask(cx);
-//!         _ <- modify(cx, |s| s + d * n);
-//!         s <- get(cx);
-//!         _ <- tell(cx, format!("s {s}"));
-//!         yield s
-//!     }.await
+//! okay::needs! {
+//!     async fn counted(cx: [Reader<i64>, State<i64>, Writer<String>], n: i64) -> i64 {
+//!         eff! {
+//!             d <- ask(cx);
+//!             _ <- modify(cx, |s| s + d * n);
+//!             s <- get(cx);
+//!             _ <- tell(cx, format!("s {s}"));
+//!             yield s
+//!         }.await
+//!     }
 //! }
 //!
 //! let cx = Cx(AskWith(2i64), Cx(StateCell::new(1i64), Cx(Collect::<String>::new(), End)));

@@ -124,17 +124,19 @@ fn all_inside_all() {
 /// "eight queens: 92 ways"
 #[test]
 fn eight_queens() {
-    async fn queens<C: Has<Choose, I>, I>(cx: &C, n: usize) -> Vec<usize> {
-        let cols: Vec<usize> = (0..n).collect();
-        let mut placed: Vec<usize> = Vec::new();
-        for row in 0..n {
-            let c = among(cx, &cols).await;
-            if placed.iter().enumerate().any(|(r, &q)| q == c || row - r == c.abs_diff(q)) {
-                fail::<(), _, _>(cx).await;
+    okay::needs! {
+        async fn queens(cx: [Choose], n: usize) -> Vec<usize> {
+            let cols: Vec<usize> = (0..n).collect();
+            let mut placed: Vec<usize> = Vec::new();
+            for row in 0..n {
+                let c = among(cx, &cols).await;
+                if placed.iter().enumerate().any(|(r, &q)| q == c || row - r == c.abs_diff(q)) {
+                    fail::<(), _, _>(cx).await;
+                }
+                placed.push(c);
             }
-            placed.push(c);
+            placed
         }
-        placed
     }
     let r = run(all(&End, async |cx| queens(cx, 8).await)).unwrap();
     assert_eq!(r.len(), 92);

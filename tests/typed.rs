@@ -7,18 +7,17 @@ use okay::eff;
 use okay::effects::{Reader, State, Throws, Writer};
 use okay::typed::*;
 
-async fn counted<C, I1, I2, I3>(cx: &C, n: i64) -> i64
-where
-    C: Has<Reader<i64>, I1> + Has<State<i64>, I2> + Has<Writer<String>, I3>,
-{
-    eff! {
-        d <- ask(cx);
-        _ <- modify(cx, |s| s + d * n);
-        s <- get(cx);
-        _ <- tell(cx, format!("s {s}"));
-        yield s
+okay::needs! {
+    async fn counted(cx: [Reader<i64>, State<i64>, Writer<String>], n: i64) -> i64 {
+        eff! {
+            d <- ask(cx);
+            _ <- modify(cx, |s| s + d * n);
+            s <- get(cx);
+            _ <- tell(cx, format!("s {s}"));
+            yield s
+        }
+        .await
     }
-    .await
 }
 
 /// a writer of another type: nothing kept — the same program compiled for it
@@ -101,4 +100,20 @@ fn throws_found_by_type() {
         _typed(cx);
         0
     }));
+}
+
+okay::needs! {
+    /// a value asked twice, of any type: the function's own type parameter beside the context's
+    async fn twice<V: Clone + std::fmt::Debug>(cx: [Reader<V>]) -> (V, V) {
+        let a = ask(cx).await;
+        let b = ask(cx).await;
+        (a, b)
+    }
+}
+
+/// "needs!: the effects listed, the context's type and indices made"
+#[test]
+fn needs_the_effects_listed() {
+    assert_eq!(run(twice(&Cx(AskWith("x".to_string()), End))), Ok(("x".to_string(), "x".to_string())));
+    assert_eq!(run(twice(&Cx(StateCell::new(0u8), Cx(AskWith(7i64), End)))), Ok((7, 7)));
 }
