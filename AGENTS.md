@@ -40,6 +40,10 @@
   sealed). `tests/typed_intercept.rs` = `tests/intercept.rs`'s programs and trails: keep the three in step. `tail_rec` for recursion in constant stack. `effect!` declares an
   effect and its operations for both forms; `needs!` an async function over a context, its effects listed (`cx:
   [Reader<i64>, State<i64>]`): the context's type and an index per effect made (a pool of 16 names, `I0`…`I15`). `tests/replay.rs` checks the replay against the machine's values.
+- Waiting on the world in `okay::typed`: `Step::Wait(future)` from a handler, polled with the program's `Context`
+  (`Has::perform` gives `Got::{Now, Taken, Wait}`). Only an effect declared `waits` (`effect!`) has `Waiting`
+  operations, which keep that future; `Perform` must keep NO field with a destructor — one costs 2–7× on the `T:`
+  lanes (measured: not unwinding, not size; `ManuallyDrop` restores it). `block_on`, `both`; `tests/async.rs`.
 - Benchmarks: `benches/kernel.rs`, okay-core's KernelBenchmark lanes, the same programs and n; run it under JMH's
   lock (`/tmp/okz/tools/withlock.py`) — other sessions measure on this machine — and compile under it too.
 - Stage 2 (not yet): `Cont<R, I, O, A>` for answer-type modification — `$`/`reset`, `shift0`, `PState` — with

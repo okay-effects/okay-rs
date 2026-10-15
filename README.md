@@ -264,6 +264,39 @@ handlers; n paths of depth d, n × d steps. The rule: the body decides by its ef
 clock read outside an effect breaks the replay, and it panics saying so). `tests/replay.rs`: the machine's suite's
 choose programs, a read before the choice, a state in each path, the triples, eight queens (92), `all` inside `all`.
 
+### Effects waiting on the world
+
+A handler may answer when a future is done — a timer, the network, a channel: `Step::Wait(Box::pin(async move { …;
+r.give(v) }))`. The operation polls it with the program's own `Context`, so the program waits as any future does,
+woken by it, on any executor: `block_on` (one program, the thread parked until woken; no dependencies), or tokio's
+`LocalSet`, or another. `both(a, b)` runs two at once, each going on while the other waits.
+
+```rust
+effect! {
+    enum Net: Plain, waits {
+        Fetch(key: String, ms: u64) -> String = fetch;
+    }
+}
+impl Handles<Net> for Network {
+    fn handle(&self, op: Net) -> Step<'_> {
+        match op {
+            Net::Fetch(key, ms, r) => Step::Wait(Box::pin(async move { sleep(ms).await; r.give(format!("<{key}>")) })),
+        }
+    }
+}
+let (a, b) = block_on(both(fetch(&cx, "a".into(), 150), fetch(&cx, "b".into(), 150)));   // 150 ms, not 300
+```
+
+The layers the same over a wait: the replay logs the answer when it comes (asked once, told again to every path), a
+watch sees it then, an interceptor waits for its handler (`pass.wait(…).await` in its own `Step::Wait`), `either`
+and `generate` go on around it. `run` polls once: a program waiting says `Stuck`.
+
+An effect that may wait is DECLARED so (`waits`): its operations are `Waiting` futures, keeping the future they wait
+on and dropping it if the program is dropped first. Every other operation is a `Perform`, keeping none — measured, a
+future to drop in the operation costs 2–7× on `reads` and `state` even when it is never there (the async block
+around it must be ready to drop it); so effects that never wait pay nothing. A handler answering later an effect not
+declared to wait panics saying so. `tests/async.rs`.
+
 ### Recursion, every effect seen, an effect declared
 
 - **`tail_rec(s0, async |s| … Loop::Next(s2) / Loop::Done(a))`**: a loop in constant stack — a recursion, a mutual
