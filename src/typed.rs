@@ -36,7 +36,7 @@
 //! okay::effect! { enum Pay: Sensitive { Transfer(n: i64) -> String = transfer; } }
 //! struct Bank;
 //! impl Handles<Pay> for Bank {
-//!     fn handle(&self, op: Pay) -> Step { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
+//!     fn handle(&self, op: Pay) -> Step<'_> { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
 //! }
 //! let cx = Cx(Bank, End);
 //! let _ = run(transfer(&cx, 5));
@@ -49,7 +49,7 @@
 //! okay::effect! { enum Pay: Sensitive { Transfer(n: i64) -> String = transfer; } }
 //! struct Bank;
 //! impl Handles<Pay> for Bank {
-//!     fn handle(&self, op: Pay) -> Step { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
+//!     fn handle(&self, op: Pay) -> Step<'_> { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
 //! }
 //! struct NotAnInterceptor;
 //! let cx = Cx(Audited::new(Bank, NotAnInterceptor), End);
@@ -63,11 +63,11 @@
 //! okay::effect! { enum Pay: Sensitive { Transfer(n: i64) -> String = transfer; } }
 //! struct Bank;
 //! impl Handles<Pay> for Bank {
-//!     fn handle(&self, op: Pay) -> Step { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
+//!     fn handle(&self, op: Pay) -> Step<'_> { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
 //! }
 //! struct Guard;
 //! impl<R> Interceptor<Pay, R, ()> for Guard {
-//!     fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, _: &R) -> Step {
+//!     fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, _: &R) -> Step<'_> {
 //!         match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("refused {n}"))) }
 //!     }
 //! }
@@ -82,11 +82,11 @@
 //! okay::effect! { enum Pay: Sensitive { Transfer(n: i64) -> String = transfer; } }
 //! struct Bank;
 //! impl Handles<Pay> for Bank {
-//!     fn handle(&self, op: Pay) -> Step { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
+//!     fn handle(&self, op: Pay) -> Step<'_> { match op { Pay::Transfer(n, r) => Step::Now(r.give(format!("ok {n}"))) } }
 //! }
 //! struct Limit(i64);
 //! impl<R> Interceptor<Pay, R, ()> for Limit {
-//!     fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, _: &R) -> Step {
+//!     fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, _: &R) -> Step<'_> {
 //!         match op {
 //!             Pay::Transfer(n, r) if n > self.0 => Step::Now(r.give(format!("refused {n}"))),
 //!             Pay::Transfer(n, r) => pass.perform(|r2| Pay::Transfer(n, r2)).map_or(Step::Later, |s| Step::Now(r.give(s))),
@@ -112,16 +112,19 @@ use crate::row::{Effect, Here, Plain, There};
 
 // HANDLERS
 
-/// what a handler does with an operation: answers it now, or takes the rest (the program suspended)
-pub enum Step {
+/// what a handler does with an operation: answers it now, takes the rest (the program suspended until the handler
+/// gives it back), or answers it when a future is done — the world's: a timer, the network, a channel; polled with
+/// the program's own `Context`, so the program waits as any future does, on any executor
+pub enum Step<'h> {
     Now(Answer),
     Later,
+    Wait(Pin<Box<dyn Future<Output = Answer> + 'h>>),
 }
 
 /// A HANDLER OF `E` in a context: `handle` each operation; an operation it took (`Later`) answered by `resume` when it
 /// gives the rest back — once
 pub trait Handles<E: Effect> {
-    fn handle(&self, op: E) -> Step;
+    fn handle(&self, op: E) -> Step<'_>;
     fn resume(&self) -> Option<Answer> {
         None
     }
@@ -130,7 +133,7 @@ pub trait Handles<E: Effect> {
 /// a handler borrowed: a part of a program run with its own context, the handler shared with the whole
 impl<E: Effect, H: Handles<E>> Handles<E> for &H {
     #[inline(always)]
-    fn handle(&self, op: E) -> Step {
+    fn handle(&self, op: E) -> Step<'_> {
         (**self).handle(op)
     }
     #[inline(always)]
@@ -169,21 +172,38 @@ impl<H> Allowed<Plain> for H {
 /// out: `Step::Later`, the rest dropped). Its own operations go to `cx`, the context after its handler — a trail, a
 /// `Throws` — found at `Ix`
 pub trait Interceptor<E: Effect, R, Ix> {
-    fn intercept<H: Handles<E>>(&self, op: E, pass: Pass<'_, H>, cx: &R) -> Step;
+    fn intercept<'a, H: Handles<E>>(&'a self, op: E, pass: Pass<'a, H>, cx: &'a R) -> Step<'a>;
 }
 
 /// the handler an interceptor passes an operation on to — the only way to it
 pub struct Pass<'h, H>(&'h H);
 
-impl<H> Pass<'_, H> {
-    /// the operation `make` given a reply, handled: its value, or none — the handler took the rest
+impl<'h, H> Pass<'h, H> {
+    /// the operation `make` given a reply, handled: its value now, or none — the handler took the rest, or answers
+    /// later (`wait` for it)
     pub fn perform<E: Effect, X: 'static>(&self, make: impl FnOnce(Reply<X>) -> E) -> Option<X>
     where
         H: Handles<E>,
     {
         match self.0.handle(make(Reply::new())) {
             Step::Now(a) => Some(a.0.take::<X>()),
-            Step::Later => None,
+            Step::Later | Step::Wait(_) => None,
+        }
+    }
+
+    /// the operation `make` given a reply, handled — its value when the handler has it (an interceptor answering
+    /// `Step::Wait(Box::pin(async move { … pass.wait(…).await … }))`), or none: the handler took the rest
+    pub fn wait<E: Effect, X: 'static>(&self, make: impl FnOnce(Reply<X>) -> E) -> impl Future<Output = Option<X>> + 'h
+    where
+        H: Handles<E>,
+    {
+        let step = self.0.handle(make(Reply::new()));
+        async move {
+            match step {
+                Step::Now(a) => Some(a.0.take::<X>()),
+                Step::Later => None,
+                Step::Wait(f) => Some(f.await.0.take::<X>()),
+            }
         }
     }
 }
@@ -224,19 +244,35 @@ pub struct End;
     note = "put a handler of `{E}` in the context; a sensitive effect's only under an interceptor of it: `Audited::new(handler, interceptor)`"
 )]
 pub trait Has<E: Effect, Ix> {
-    /// the operation's value now, or none: taken, the program suspended
-    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Option<T>;
+    /// the operation's value now, none yet (taken, the program suspended), or a future of it
+    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Got<'_, T>;
     /// the operation taken given back: its value, or none — taken still
     fn resume<T: Clone + Debug + 'static>(&self) -> Option<T>;
 }
 
+/// what an operation got from its context: its value now, none yet (taken: the program suspended until given back),
+/// or a future of it
+pub enum Got<'a, T> {
+    Now(T),
+    Taken,
+    Wait(Pin<Box<dyn Future<Output = T> + 'a>>),
+}
+
+impl<'a, T: 'static> Got<'a, T> {
+    #[inline(always)]
+    fn of(step: Step<'a>) -> Self {
+        match step {
+            Step::Now(a) => Got::Now(a.0.take::<T>()),
+            Step::Later => Got::Taken,
+            Step::Wait(f) => Got::Wait(Box::pin(async move { f.await.0.take::<T>() })),
+        }
+    }
+}
+
 impl<E: Effect, H: Handles<E> + Allowed<E::Kind>, R> Has<E, Here> for Cx<H, R> {
     #[inline(always)]
-    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Option<T> {
-        match self.0.handle(op) {
-            Step::Now(a) => Some(a.0.take::<T>()),
-            Step::Later => None,
-        }
+    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Got<'_, T> {
+        Got::of(self.0.handle(op))
     }
     #[inline(always)]
     fn resume<T: Clone + Debug + 'static>(&self) -> Option<T> {
@@ -246,7 +282,7 @@ impl<E: Effect, H: Handles<E> + Allowed<E::Kind>, R> Has<E, Here> for Cx<H, R> {
 
 impl<E: Effect, H, R: Has<E, Ix>, Ix> Has<E, There<Ix>> for Cx<H, R> {
     #[inline(always)]
-    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Option<T> {
+    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Got<'_, T> {
         self.1.perform(op)
     }
     #[inline(always)]
@@ -257,7 +293,7 @@ impl<E: Effect, H, R: Has<E, Ix>, Ix> Has<E, There<Ix>> for Cx<H, R> {
 
 impl<E: Effect, Ix, C: Has<E, Ix>> Has<E, Ix> for &C {
     #[inline(always)]
-    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Option<T> {
+    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Got<'_, T> {
         (**self).perform(op)
     }
     #[inline(always)]
@@ -268,11 +304,8 @@ impl<E: Effect, Ix, C: Has<E, Ix>> Has<E, Ix> for &C {
 
 impl<E: Effect, H: Handles<E>, I: Interceptor<E, R, Ix>, R, Ix> Has<E, Through<Ix>> for Cx<Audited<H, I>, R> {
     #[inline]
-    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Option<T> {
-        match self.0.interceptor.intercept(op, Pass(&self.0.handler), &self.1) {
-            Step::Now(a) => Some(a.0.take::<T>()),
-            Step::Later => None,
-        }
+    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Got<'_, T> {
+        Got::of(self.0.interceptor.intercept(op, Pass(&self.0.handler), &self.1))
     }
     /// the rest taken by an interceptor (an error raised further out) is not given back
     fn resume<T: Clone + Debug + 'static>(&self) -> Option<T> {
@@ -280,7 +313,10 @@ impl<E: Effect, H: Handles<E>, I: Interceptor<E, R, Ix>, R, Ix> Has<E, Through<I
     }
 }
 
-// AN OPERATION: a future — answered at once by a handler in place, else pending until its handler resumes it
+// AN OPERATION: a future — answered at once by a handler in place, else pending until its handler resumes it. An
+// operation of an effect that waits on the world (`effect!`'s `waits`) is a `Waiting`: it keeps the future its
+// handler answered with, and drops it if the program is dropped first. A `Perform` keeps none — nothing to drop, so
+// a program's loop over it compiles to the handler's code alone (a field to drop costs 2–7× on `reads`, `state`)
 
 pub struct Perform<'c, C, E, Ix, T> {
     cx: &'c C,
@@ -303,15 +339,82 @@ impl<C: Has<E, Ix>, E: Effect, Ix, T: Clone + Debug + 'static> Future for Perfor
     #[inline(always)]
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<T> {
         let me = self.get_mut();
-        let t = match me.op.take() {
+        let got = match me.op.take() {
             Some(op) => me.cx.perform::<T>(op),
-            None => me.cx.resume::<T>(),
+            None => {
+                return match me.cx.resume::<T>() {
+                    Some(t) => Poll::Ready(t),
+                    None => Poll::Pending,
+                };
+            }
         };
-        match t {
-            Some(t) => Poll::Ready(t),
-            None => Poll::Pending,
+        match got {
+            Got::Now(t) => Poll::Ready(t),
+            Got::Taken => Poll::Pending,
+            Got::Wait(_) => not_waiting(std::any::type_name::<E>()),
         }
     }
+}
+
+#[cold]
+fn not_waiting(effect: &str) -> ! {
+    panic!(
+        "okay: a handler of `{effect}` answered later (`Step::Wait`), but `{effect}` is not an effect that waits — \
+         declare it so: `effect! {{ enum … : Plain, waits {{ … }} }}`, its operations `waiting(cx, …)`"
+    )
+}
+
+/// AN OPERATION OF AN EFFECT THAT WAITS: as `Perform`, and the future its handler answered with kept until it is done
+pub struct Waiting<'c, C, E, Ix, T> {
+    cx: &'c C,
+    op: Option<E>,
+    waiting: Option<Pin<Box<dyn Future<Output = T> + 'c>>>,
+    _t: PhantomData<fn() -> Ix>,
+}
+
+impl<C, E, Ix, T> Unpin for Waiting<'_, C, E, Ix, T> {}
+
+impl<C: Has<E, Ix>, E: Effect, Ix, T: Clone + Debug + 'static> Future for Waiting<'_, C, E, Ix, T> {
+    type Output = T;
+    fn poll(self: Pin<&mut Self>, c: &mut Context<'_>) -> Poll<T> {
+        let me = self.get_mut();
+        if let Some(w) = me.waiting.as_mut() {
+            let p = w.as_mut().poll(c);
+            if p.is_ready() {
+                me.waiting = None;
+            }
+            return p;
+        }
+        let got = match me.op.take() {
+            Some(op) => me.cx.perform::<T>(op),
+            None => {
+                return match me.cx.resume::<T>() {
+                    Some(t) => Poll::Ready(t),
+                    None => Poll::Pending,
+                };
+            }
+        };
+        match got {
+            Got::Now(t) => Poll::Ready(t),
+            Got::Taken => Poll::Pending,
+            Got::Wait(mut f) => {
+                let p = f.as_mut().poll(c);
+                if p.is_pending() {
+                    me.waiting = Some(f);
+                }
+                p
+            }
+        }
+    }
+}
+
+/// an operation of an effect that waits on the world: `make` its variant given its reply
+#[inline(always)]
+pub fn waiting<'c, C: Has<E, Ix>, E: Effect, Ix, T: Clone + Debug + 'static>(
+    cx: &'c C,
+    make: impl FnOnce(Reply<T>) -> E,
+) -> Waiting<'c, C, E, Ix, T> {
+    Waiting { cx, op: Some(make(Reply::new())), waiting: None, _t: PhantomData }
 }
 
 /// an operation of `E` in the context: `make` its variant given its reply
@@ -358,7 +461,7 @@ pub async fn raise<E: Clone + std::fmt::Debug + 'static, A, C: Has<Throws<E>, I>
 pub struct AskWith<V>(pub V);
 impl<V: Clone + std::fmt::Debug + 'static> Handles<Reader<V>> for AskWith<V> {
     #[inline(always)]
-    fn handle(&self, op: Reader<V>) -> Step {
+    fn handle(&self, op: Reader<V>) -> Step<'_> {
         match op {
             Reader::Ask(r) => Step::Now(r.give(self.0.clone())),
         }
@@ -377,7 +480,7 @@ impl<S> StateCell<S> {
 }
 impl<S: Clone + std::fmt::Debug + 'static> Handles<State<S>> for StateCell<S> {
     #[inline(always)]
-    fn handle(&self, op: State<S>) -> Step {
+    fn handle(&self, op: State<S>) -> Step<'_> {
         match op {
             State::Get(r) => Step::Now(r.give(self.0.borrow().clone())),
             State::Put(s, r) => {
@@ -405,7 +508,7 @@ impl<W> Default for Collect<W> {
 }
 impl<W: Clone + std::fmt::Debug + 'static> Handles<Writer<W>> for Collect<W> {
     #[inline(always)]
-    fn handle(&self, op: Writer<W>) -> Step {
+    fn handle(&self, op: Writer<W>) -> Step<'_> {
         match op {
             Writer::Tell(w, r) => {
                 self.0.borrow_mut().push(w);
@@ -445,7 +548,7 @@ pub async fn catch<E, A>(raised: &Raised<E>, program: impl Future<Output = A>) -
 }
 impl<E: Clone + std::fmt::Debug + 'static> Handles<Throws<E>> for Raised<E> {
     #[inline(always)]
-    fn handle(&self, op: Throws<E>) -> Step {
+    fn handle(&self, op: Throws<E>) -> Step<'_> {
         match op {
             Throws::Raise(e, _) => {
                 *self.0.borrow_mut() = Some(e);
@@ -495,7 +598,7 @@ pub struct Emitted<V> {
 }
 impl<V: Clone + std::fmt::Debug + 'static> Handles<Emit<V>> for Emitted<V> {
     #[inline(always)]
-    fn handle(&self, op: Emit<V>) -> Step {
+    fn handle(&self, op: Emit<V>) -> Step<'_> {
         match op {
             Emit::Value(v, _) => {
                 *self.slot.borrow_mut() = Some(v);
@@ -614,25 +717,25 @@ fn not_replayed() -> ! {
 
 impl<C> Has<Choose, Here> for Paths<'_, C> {
     #[inline]
-    fn perform<T: Clone + Debug + 'static>(&self, op: Choose) -> Option<T> {
+    fn perform<T: Clone + Debug + 'static>(&self, op: Choose) -> Got<'_, T> {
         match op {
             Choose::Among(n, r) => {
                 let i = match self.replayed::<usize>() {
                     Some(i) => i,
                     None if n == 0 => {
                         self.failed.set(true);
-                        return None;
+                        return Got::Taken;
                     }
                     None => {
                         self.tell(&0usize, n);
                         0
                     }
                 };
-                Some(r.give(i).0.take::<T>())
+                Got::Now(r.give(i).0.take::<T>())
             }
             Choose::Fail(_) => {
                 self.failed.set(true);
-                None
+                Got::Taken
             }
         }
     }
@@ -643,13 +746,22 @@ impl<C> Has<Choose, Here> for Paths<'_, C> {
 
 impl<E: Effect, C: Has<E, Ix>, Ix> Has<E, There<Ix>> for Paths<'_, C> {
     #[inline]
-    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Option<T> {
+    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Got<'_, T> {
         if let Some(t) = self.replayed::<T>() {
-            return Some(t);
+            return Got::Now(t);
         }
-        let t = self.outer.perform::<T>(op)?;
-        self.tell(&t, 0);
-        Some(t)
+        match self.outer.perform::<T>(op) {
+            Got::Now(t) => {
+                self.tell(&t, 0);
+                Got::Now(t)
+            }
+            Got::Taken => Got::Taken,
+            Got::Wait(f) => Got::Wait(Box::pin(async move {
+                let t = f.await;
+                self.tell(&t, 0);
+                t
+            })),
+        }
     }
     #[inline]
     fn resume<T: Clone + Debug + 'static>(&self) -> Option<T> {
@@ -765,22 +877,27 @@ pub struct Observed<'c, W, C> {
 }
 
 impl<E: Effect, Ix, W: Watch, C: Has<E, Ix>> Has<E, Ix> for Observed<'_, W, C> {
-    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Option<T> {
+    fn perform<T: Clone + Debug + 'static>(&self, op: E) -> Got<'_, T> {
         let effect = effect_name(std::any::type_name::<E>());
         if let Err(why) = self.watch.before(&effect, &op) {
             *self.refused.borrow_mut() = Some(why);
-            return None;
+            return Got::Taken;
         }
         let seen = op.clone();
         match self.outer.perform::<T>(op) {
-            Some(t) => {
+            Got::Now(t) => {
                 self.watch.after(&effect, &seen, &t);
-                Some(t)
+                Got::Now(t)
             }
-            None => {
+            Got::Taken => {
                 *self.waiting.borrow_mut() = Some((effect.into_owned(), Box::new(seen)));
-                None
+                Got::Taken
             }
+            Got::Wait(f) => Got::Wait(Box::pin(async move {
+                let t = f.await;
+                self.watch.after(&effect, &seen, &t);
+                t
+            })),
         }
     }
     fn resume<T: Clone + Debug + 'static>(&self) -> Option<T> {
@@ -840,7 +957,7 @@ impl Default for Trail {
 }
 impl Handles<Audit> for Trail {
     #[inline]
-    fn handle(&self, op: Audit) -> Step {
+    fn handle(&self, op: Audit) -> Step<'_> {
         match op {
             Audit::Record(line, r) => {
                 self.0.borrow_mut().push(line);
@@ -855,6 +972,58 @@ impl Handles<Audit> for Trail {
 /// why a run did not end: an operation taken by a handler that never gives it back, with none outside to drop it
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stuck;
+
+/// A PROGRAM RUN TO ITS VALUE, WAITING ON THE WORLD: polled, the thread parked until a handler's future wakes it — an
+/// executor of one program, no dependencies. Under another (tokio's `LocalSet`, …) a program is a future as any.
+/// One that never wakes — an operation taken, never given back — waits for ever: `run` says `Stuck` instead
+pub fn block_on<F: Future>(fut: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let mut fut = pin!(fut);
+    let waker = Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut c = Context::from_waker(&waker);
+    loop {
+        if let Poll::Ready(a) = fut.as_mut().poll(&mut c) {
+            return a;
+        }
+        std::thread::park();
+    }
+}
+
+/// two programs at once, each going on while the other waits: both values. Their effects' handlers shared; one taking
+/// the rest (`Later`: either, generate, the replay of `all`) wants one program at a time
+pub async fn both<A, B>(a: impl Future<Output = A>, b: impl Future<Output = B>) -> (A, B) {
+    let (mut a, mut b) = (pin!(a), pin!(b));
+    let (mut ra, mut rb) = (None, None);
+    std::future::poll_fn(|c| {
+        if ra.is_none()
+            && let Poll::Ready(x) = a.as_mut().poll(c)
+        {
+            ra = Some(x);
+        }
+        if rb.is_none()
+            && let Poll::Ready(y) = b.as_mut().poll(c)
+        {
+            rb = Some(y);
+        }
+        match (ra.take(), rb.take()) {
+            (Some(x), Some(y)) => Poll::Ready((x, y)),
+            (x, y) => {
+                ra = x;
+                rb = y;
+                Poll::Pending
+            }
+        }
+    })
+    .await
+}
 
 /// an operation (a program) done now, where no `.await` is — in an interceptor: its value, or none — taken
 pub fn now<F: Future>(fut: F) -> Option<F::Output> {

@@ -358,7 +358,7 @@ mod typed {
     pub struct Ticking;
     impl Handles<Tick> for Ticking {
         #[inline(always)]
-        fn handle(&self, op: Tick) -> Step {
+        fn handle(&self, op: Tick) -> Step<'_> {
             match op {
                 Tick::Value(i, r) => Step::Now(r.give(i)),
             }
@@ -449,7 +449,7 @@ mod typed {
     pub struct Passing;
     impl<R> Interceptor<Tick, R, ()> for Passing {
         #[inline(always)]
-        fn intercept<H: Handles<Tick>>(&self, op: Tick, pass: Pass<'_, H>, _: &R) -> Step {
+        fn intercept<H: Handles<Tick>>(&self, op: Tick, pass: Pass<'_, H>, _: &R) -> Step<'_> {
             match op {
                 Tick::Value(i, r) => pass.perform(|r2| Tick::Value(i, r2)).map_or(Step::Later, |v| Step::Now(r.give(v))),
             }

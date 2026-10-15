@@ -23,7 +23,7 @@ okay::needs! {
 /// a writer of another type: nothing kept — the same program compiled for it
 struct Silent;
 impl Handles<Writer<String>> for Silent {
-    fn handle(&self, op: Writer<String>) -> Step {
+    fn handle(&self, op: Writer<String>) -> Step<'_> {
         match op {
             Writer::Tell(_, r) => Step::Now(r.give(())),
         }

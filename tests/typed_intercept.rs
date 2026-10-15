@@ -24,7 +24,7 @@ effect! {
 /// the bank: a balance, each transfer taken from it
 struct Bank(RefCell<i64>);
 impl Handles<Pay> for Bank {
-    fn handle(&self, op: Pay) -> Step {
+    fn handle(&self, op: Pay) -> Step<'_> {
         match op {
             Pay::Transfer(to, amount, r) => {
                 *self.0.borrow_mut() -= amount;
@@ -50,7 +50,7 @@ impl<R, I1, I2> Interceptor<Pay, R, (I1, I2)> for Guarded
 where
     R: Has<Throws<String>, I1> + Has<Audit, I2>,
 {
-    fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, cx: &R) -> Step {
+    fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, cx: &R) -> Step<'_> {
         match op {
             Pay::Transfer(to, amount, r) => {
                 let to = to.trim().to_uppercase();
@@ -110,7 +110,7 @@ fn a_sensitive_effect_under_its_audit_passed_on_changed_told_masked_refused_over
 fn a_plain_effect_intercepted_for_a_part_of_the_program() {
     struct Shouting;
     impl<R> Interceptor<Writer<String>, R, ()> for Shouting {
-        fn intercept<H: Handles<Writer<String>>>(&self, op: Writer<String>, pass: Pass<'_, H>, _: &R) -> Step {
+        fn intercept<H: Handles<Writer<String>>>(&self, op: Writer<String>, pass: Pass<'_, H>, _: &R) -> Step<'_> {
             match op {
                 Writer::Tell(s, r) => match pass.perform(|r2| Writer::Tell(s.to_uppercase(), r2)) {
                     Some(()) => Step::Now(r.give(())),
@@ -133,7 +133,7 @@ fn a_plain_effect_intercepted_for_a_part_of_the_program() {
 /// passes every payment on as it is
 struct Passing;
 impl<R> Interceptor<Pay, R, ()> for Passing {
-    fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, _: &R) -> Step {
+    fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, _: &R) -> Step<'_> {
         match op {
             Pay::Transfer(to, n, r) => pass.perform(|r2| Pay::Transfer(to, n, r2)).map_or(Step::Later, |s| Step::Now(r.give(s))),
             Pay::Balance(r) => pass.perform(Pay::Balance).map_or(Step::Later, |b| Step::Now(r.give(b))),

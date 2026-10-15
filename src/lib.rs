@@ -111,7 +111,8 @@ macro_rules! eff {
 
 /// AN EFFECT DECLARED: its enum (`Clone`, `Debug`, each operation's `Reply` last), its kind, and each operation twice —
 /// for a program as data (`Pay::transfer(…)`, an `Eff`) and for one compiled by its handlers' types (`transfer(cx, …)`,
-/// `okay::typed`)
+/// `okay::typed`). An effect whose handlers may answer later — waiting on the world: `Step::Wait` — is declared so,
+/// `enum Net: Plain, waits { … }`: its operations keep the future they wait on (`typed::Waiting`)
 ///
 /// ```
 /// use okay::*;
@@ -129,7 +130,7 @@ macro_rules! eff {
 ///
 /// struct Counter(std::cell::Cell<i64>);
 /// impl Handles<Count> for Counter {
-///     fn handle(&self, op: Count) -> Step {
+///     fn handle(&self, op: Count) -> Step<'_> {
 ///         match op {
 ///             Count::Add(n, r) => { self.0.set(self.0.get() + n); Step::Now(r.give(self.0.get())) }
 ///             Count::Now(r) => Step::Now(r.give(self.0.get())),
@@ -151,10 +152,35 @@ macro_rules! eff {
 macro_rules! effect {
     (
         $(#[$m:meta])*
+        $vis:vis enum $name:ident : $kind:ident, waits {
+            $(
+                $(#[$om:meta])*
+                $op:ident ( $($arg:ident : $ty:ty),* $(,)? ) -> $out:ty = $f:ident ;
+            )*
+        }
+    ) => {
+        $crate::effect!(@decl [$(#[$m])*] $vis $name $kind [Waiting waiting] {
+            $( [$(#[$om])*] $op ( $($arg : $ty),* ) -> $out = $f ; )*
+        });
+    };
+    (
+        $(#[$m:meta])*
         $vis:vis enum $name:ident : $kind:ident {
             $(
                 $(#[$om:meta])*
                 $op:ident ( $($arg:ident : $ty:ty),* $(,)? ) -> $out:ty = $f:ident ;
+            )*
+        }
+    ) => {
+        $crate::effect!(@decl [$(#[$m])*] $vis $name $kind [Perform perform] {
+            $( [$(#[$om])*] $op ( $($arg : $ty),* ) -> $out = $f ; )*
+        });
+    };
+    (
+        @decl [$(#[$m:meta])*] $vis:vis $name:ident $kind:ident [$fut:ident $make:ident] {
+            $(
+                [$(#[$om:meta])*]
+                $op:ident ( $($arg:ident : $ty:ty),* ) -> $out:ty = $f:ident ;
             )*
         }
     ) => {
@@ -184,8 +210,8 @@ macro_rules! effect {
             #[allow(clippy::too_many_arguments)]
             $vis fn $f<'c, OkayCx: $crate::typed::Has<$name, OkayIx>, OkayIx>(
                 cx: &'c OkayCx $(, $arg: $ty)*
-            ) -> $crate::typed::Perform<'c, OkayCx, $name, OkayIx, $out> {
-                $crate::typed::perform(cx, move |r| $name::$op($($arg,)* r))
+            ) -> $crate::typed::$fut<'c, OkayCx, $name, OkayIx, $out> {
+                $crate::typed::$make(cx, move |r| $name::$op($($arg,)* r))
             }
         )*
     };

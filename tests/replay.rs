@@ -148,7 +148,7 @@ fn eight_queens() {
 fn answers_further_out_asked_once() {
     struct Counted(RefCell<i64>);
     impl Handles<Reader<i64>> for Counted {
-        fn handle(&self, op: Reader<i64>) -> Step {
+        fn handle(&self, op: Reader<i64>) -> Step<'_> {
             match op {
                 Reader::Ask(r) => {
                     *self.0.borrow_mut() += 1;

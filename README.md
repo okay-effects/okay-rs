@@ -281,7 +281,7 @@ choose programs, a read before the choice, a state in each path, the triples, ei
 ```rust
 impl<R, I1, I2> Interceptor<Pay, R, (I1, I2)> for Guarded
 where R: Has<Throws<String>, I1> + Has<Audit, I2> {
-    fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, cx: &R) -> Step {
+    fn intercept<H: Handles<Pay>>(&self, op: Pay, pass: Pass<'_, H>, cx: &R) -> Step<'_> {
         match op {
             Pay::Transfer(to, amount, r) => {
                 let to = to.trim().to_uppercase();
