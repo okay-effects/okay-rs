@@ -1,4 +1,11 @@
-# okay-rs
+# okay-rs — moved to [okay-rust](https://github.com/sergey-scherbina/okay-rust)
+
+**This repository has moved: https://github.com/sergey-scherbina/okay-rust.** Its whole history is there; the crate
+(`okay`, okay-core's kernel in Rust) is the root crate of okay-rust, beside `okay-effects` (capabilities on
+async/await, okay-kernel's protocol, middleware, okay's wire both ways). New work goes there only.
+
+---
+
 
 okay-core's kernel (`okay.one`) in Rust: a program of effects is DATA (`Eff<R, A>`, a tree of nodes), its effects a
 ROW of types, its handlers VALUES of three forms not tied to it, the rest `k` data too — resumed any number of times,

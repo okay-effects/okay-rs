@@ -1,3 +1,8 @@
+# MOVED
+
+This repository moved to https://github.com/sergey-scherbina/okay-rust (local: ~/work/my/okay-rust), history
+included. Do not work here.
+
 # okay-rs — notes for agents
 
 - Rust 2024 (rustc 1.92), no dependencies; `cargo test` runs the unit, integration and doc tests (the doc tests hold
