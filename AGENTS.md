@@ -1,6 +1,6 @@
 # MOVED
 
-This repository moved to https://github.com/sergey-scherbina/okay-rust (local: ~/work/my/okay-rust), history
+This repository moved to https://github.com/okay-effects/okay-rust (local: ~/work/my/okay-rust), history
 included. Do not work here.
 
 # okay-rs — notes for agents

@@ -1,6 +1,6 @@
-# okay-rs — moved to [okay-rust](https://github.com/sergey-scherbina/okay-rust)
+# okay-rs — moved to [okay-rust](https://github.com/okay-effects/okay-rust)
 
-**This repository has moved: https://github.com/sergey-scherbina/okay-rust.** Its whole history is there; the crate
+**This repository has moved: https://github.com/okay-effects/okay-rust.** Its whole history is there; the crate
 (`okay`, okay-core's kernel in Rust) is the root crate of okay-rust, beside `okay-effects` (capabilities on
 async/await, okay-kernel's protocol, middleware, okay's wire both ways). New work goes there only.
 
